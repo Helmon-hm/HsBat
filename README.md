@@ -5,7 +5,7 @@
 纯大模型方案延迟较高（每次 1-5 秒），不适合炉石传说这种回合有时间限制的游戏。采用 **传统 CV + 大模型** 混合架构：
 
 - **底层 (经典 CV)**：OpenCV 模板匹配 + Tesseract OCR 快速识别固定 UI 元素（按钮、法力水晶、血量）
-- **高层 (大模型)**：仅在需要策略决策时调用 LLM API（如选择出哪张牌、攻击哪个目标）
+- **高层 (大模型/规则引擎)**：策略决策，大模型智能决策或规则引擎快速响应，两种模式可在 GUI 中一键切换
 
 ## 项目结构
 
@@ -23,8 +23,11 @@ HsBat/
 │   ├── decision_maker.py    # 模块2: 策略决策 (规则引擎 + 大模型 API)
 │   ├── action_executor.py   # 模块3: 动作执行 (PyAutoGUI + 贝塞尔曲线)
 │   ├── game_controller.py   # 主控制器 - 游戏循环调度
-│   └── logger.py            # 日志模块
-├── screenshots/             # 调试截图输出目录（按时间戳命名）
+│   ├── gui_app.py           # GUI 界面 (tkinter)
+│   ├── logger.py            # 日志模块
+│   └── paths.py             # 路径工具
+├── screenshots/             # 调试截图输出目录
+└── logs/                    # 日志输出目录
 ```
 
 ## 系统要求
@@ -72,28 +75,30 @@ set HSBAT_LLM_API_KEY=your_api_key_here
 
 ## 使用方法
 
-### 基础运行 (纯规则引擎)
-
-```bash
-python main.py --rule-only
-```
-
-### 带大模型决策
+### GUI 模式 (默认)
 
 ```bash
 python main.py
 ```
 
-### 调试模式
+启动图形界面，可在设置页中配置所有参数，点击"启动"开始 Bot。
+
+### 命令行模式
 
 ```bash
-python main.py --debug
+python main.py --cli
+```
+
+### 规则引擎快速模式
+
+```bash
+python main.py --cli --rule-only
 ```
 
 ### 仅识别不执行 (安全试运行)
 
 ```bash
-python main.py --dry-run
+python main.py --cli --dry-run
 ```
 
 ### 命令行参数
@@ -101,8 +106,7 @@ python main.py --dry-run
 | 参数 | 说明 |
 |------|------|
 | `-c, --config PATH` | 配置文件路径 (默认: config.yaml) |
-| `-d, --debug` | 启用调试模式 |
-| `--no-debug-ui` | 禁用调试可视化窗口 |
+| `--cli` | 使用命令行模式 (默认启动 GUI) |
 | `--rule-only` | 仅使用规则引擎，不调用大模型 |
 | `--dry-run` | 仅运行识别模式，不执行任何鼠标操作 |
 
@@ -110,6 +114,7 @@ python main.py --dry-run
 
 ### 模块 1: 状态识别 (StateRecognizer)
 
+- **屏幕分辨率自动检测**: 启动时通过 `pyautogui.size()` 获取实际分辨率，所有识别区域使用相对百分比自适应
 - **模板匹配**: 使用 `cv2.matchTemplate` 识别结束回合按钮
 - **绿色边框检测**: HSV 颜色空间检测可攻击随从的绿色边框光晕
 - **法力水晶识别**: 颜色阈值 + 轮廓检测
@@ -117,13 +122,18 @@ python main.py --dry-run
 - **手牌检测**: Canny 边缘检测 + 轮廓分析
 - **随从检测**: 区域边缘检测 + OCR 攻防数值
 - **回合判断**: OCR 识别回合文字（无 Tesseract 时通过按钮隐藏判断）
+- **对局结束检测**: OCR 识别"胜利/失败/Victory/Defeat"等关键词
+- **主菜单检测**: OCR 识别"开始/对战/Play"等按钮文字
 
 ### 模块 2: 策略决策 (DecisionMaker)
 
 - **规则引擎** (快速，无需网络):
-  - 优先出牌（从高费到低费）
-  - 随从优先攻击敌方随从
-  - 无操作可做则结束回合
+  - **出牌策略**: 优先出高费 / 优先出低费（铺场）
+  - **攻击策略**: 智能（斩杀优先、危险解场） / 只打脸 / 只解场
+  - **危险防御**: 敌方场攻超过斩杀线时自动切换解场模式
+  - **斩杀检测**: 场攻 ≥ 敌方血量时直接打脸斩杀
+  - **效率交换**: 贪心算法找最优随从交换对
+  - **英雄技能**: 剩余费用 ≥ 2 时自动使用
 
 - **大模型引擎** (智能，需 API):
   - 将结构化游戏状态转为文本提示
@@ -137,6 +147,16 @@ python main.py --dry-run
 - **随机延迟**: 每步操作加入 150-700ms 随机延迟
 - **拖拽出牌**: 模拟从手牌拖拽到战场的操作
 - **Failsafe**: 鼠标移到左上角可紧急停止
+
+### 对局自动重排队
+
+对局结束后自动：
+1. 检测到游戏结束画面
+2. 反复点击跳过结算/奖励动画
+3. 回到主菜单后检测并点击"开始"按钮
+4. 进入新对局继续 Bot
+
+可在 GUI 设置页的"对局结束后自动开始下一局"开关控制。
 
 ### 调试截图
 
@@ -154,11 +174,15 @@ python main.py --dry-run
 
 | 配置项 | 说明 | 默认值 |
 |--------|------|--------|
-| `screen.game_region` | 游戏窗口区域 | 1920x1080 |
+| `screen.game_region.width/height` | 游戏窗口区域 | 0=自动检测 |
+| `game.*_region` | 各识别区域百分比 | 百分比值 |
 | `templates.match_threshold` | 模板匹配阈值 | 0.75 |
 | `llm.enabled` | 启用大模型 | true |
 | `llm.api_base` | API 地址 | https://api.openai.com/v1 |
 | `llm.model` | 模型名称 | gpt-4o |
+| `rule_engine.play_card_strategy` | 出牌策略 | high_cost_first |
+| `rule_engine.attack_strategy` | 攻击策略 | smart |
+| `game.auto_requeue` | 对局结束自动开始下一局 | true |
 | `action.bezier_points` | 贝塞尔曲线点数 | 20 |
 | `debug.save_screenshots` | 保存调试区域截图 | true |
 
@@ -172,14 +196,13 @@ python main.py --dry-run
 ## 输出示例
 
 ```
-2024-01-15 14:30:01 [INFO] Main - HsBat v1.0 启动
-2024-01-15 14:30:01 [INFO] Main - 大模型决策: 开启
-2024-01-15 14:30:02 [DEBUG] StateRecognizer - 状态: 回合=敌方 血量=30/30 法力=0/0 手牌=0张
-2024-01-15 14:30:03 [INFO] GameController - 检测到我方回合开始
-2024-01-15 14:30:03 [INFO] GameController - === 第 1 回合 ===
-2024-01-15 14:30:04 [INFO] DecisionMaker - 调用大模型 (gpt-4o)...
-2024-01-15 14:30:06 [INFO] DecisionMaker - 大模型决策: 出[精灵弓箭手](费用1)
-2024-01-15 14:30:06 [INFO] GameController - 执行动作: play_card - 大模型: 出[精灵弓箭手]
+2026-06-18 16:01:06 [INFO] Main - HsBat v2.0 GUI 模式启动
+2026-06-18 16:01:06 [INFO] Main - 决策模式: 规则引擎
+2026-06-18 16:01:06 [INFO] StateRecognizer - 自动检测屏幕分辨率: 3840 x 2160
+2026-06-18 16:01:07 [DEBUG] StateRecognizer - 状态: 回合=我方 血量=30/30 法力=5/5 手牌=3张
+2026-06-18 16:01:07 [INFO] GameController - === 第 1 回合 ===
+2026-06-18 16:01:07 [INFO] DecisionMaker - 规则决策: 出牌 [精灵弓箭手](费用1, 策略=low_cost_first)
+2026-06-18 16:01:07 [INFO] GameController - 执行动作: play_card - 规则引擎: 出牌 [精灵弓箭手]
 ```
 
 ## 许可证
