@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+dist/
+build_temp/
+*.spec
+
+# Project
+logs/
+screenshots/
+debug_screenshot_*.png
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Config with secrets (user should provide their own)
+# config.yaml is tracked but without API keys

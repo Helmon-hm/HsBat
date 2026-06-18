@@ -1,0 +1,97 @@
+screen:
+  game_region:
+    x: 0
+    y: 0
+    width: 1920
+    height: 1080
+  scale: 1.0
+templates:
+  directory: templates
+  match_threshold: 0.75
+  end_turn_button: end_turn.png
+  our_turn_indicator: our_turn.png
+  attack_button: attack.png
+  confirm_button: confirm.png
+ocr:
+  tesseract_path: C:\Program Files\Tesseract-OCR\tesseract.exe
+  lang: eng+chi_sim
+  card_cost_offset:
+    dx: 0
+    dy: -30
+    width: 40
+    height: 30
+llm:
+  enabled: true
+  provider: openai_compatible
+  api_key: ""  # 通过环境变量 HSBAT_LLM_API_KEY 设置，或直接在 GUI 中填写
+  api_base: https://api.openai.com/v1
+  model: gpt-4o
+  timeout: 15
+  max_retries: 2
+  temperature: 0.3
+  system_prompt: "你是炉石传说资深玩家。根据当前的游戏状态（手牌、法力水晶、场上随从、双方血量等），做出最优决策。\n请严格按照以下JSON格式输出你的决策：\n\
+    {\n  \"action\": \"play_card\" | \"attack\" | \"use_hero_power\" | \"end_turn\"\
+    \ | \"wait\",\n  \"card_index\": <int or null>,\n  \"target_index\": <int or null>,\n\
+    \  \"target_type\": \"enemy_hero\" | \"enemy_minion\" | \"friendly_minion\" |\
+    \ null,\n  \"reason\": \"<简短中文原因>\"\n}\n说明：\n- card_index: 0-based, 手牌索引（从左到右），不出牌时为null\n\
+    - target_index: 攻击或法术目标索引，0-based\n- play_card: 出牌，需要指定card_index和可能的target_index\n\
+    - attack: 用随从攻击，由主控制器决定攻击者，此动作表示攻击指令\n- use_hero_power: 使用英雄技能\n- 如果法力值不足或无法做任何事，输出\
+    \ end_turn\n"
+action:
+  mouse_move_delay:
+    min: 0.1
+    max: 0.25
+  click_delay:
+    min: 0.15
+    max: 0.4
+  drag_duration:
+    min: 0.25
+    max: 0.5
+  rest_delay:
+    min: 0.1
+    max: 0.3
+  bezier_control_offset:
+    min: 30
+    max: 120
+  bezier_points: 20
+game:
+  mana_region:
+  - 70
+  - 30
+  - 120
+  - 50
+  health_region:
+  - 870
+  - 965
+  - 180
+  - 40
+  enemy_health_region:
+  - 870
+  - 75
+  - 180
+  - 40
+  hand_card_region:
+  - 160
+  - 920
+  - 1600
+  - 160
+  mana_color_lower:
+  - 200
+  - 180
+  - 50
+  mana_color_upper:
+  - 255
+  - 230
+  - 130
+  turn_indicator_region:
+  - 800
+  - 480
+  - 320
+  - 120
+debug:
+  enabled: true
+  show_debug_window: true
+  save_screenshots: true
+  screenshot_dir: screenshots
+  log_level: DEBUG
+  ui_update_interval: 0.5
