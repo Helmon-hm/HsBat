@@ -6,7 +6,7 @@ from typing import Dict, List, Optional
 import requests
 
 from src.logger import HsBatLogger
-from src.state_recognizer import GameState
+from src.state_recognizer import GameState, MinionInfo
 
 
 class DecisionMaker:
@@ -32,46 +32,251 @@ class DecisionMaker:
         else:
             return self._rule_decide(game_state)
 
+    # ================================================================
+    #  规则引擎 (可配置策略，零延迟)
+    # ================================================================
     def _rule_decide(self, game_state: GameState) -> Dict:
         if not game_state.is_our_turn:
             return {"action": "wait", "reason": "等待我方回合"}
 
-        playable_cards = [c for c in game_state.hand_cards if c.is_playable]
-        if playable_cards:
-            card = playable_cards[-1]
-            self.logger.info(f"规则决策: 出牌 [{card.name}](费用{card.cost})")
+        rule_cfg = self.cfg.get("rule_engine", {})
+        play_strategy = rule_cfg.get("play_card_strategy", "high_cost_first")
+        use_hp = rule_cfg.get("use_hero_power", True)
+
+        # 1) 出牌
+        playable = [c for c in game_state.hand_cards if c.is_playable]
+        if playable:
+            if play_strategy == "high_cost_first":
+                card = max(playable, key=lambda c: c.cost)
+            else:
+                card = min(playable, key=lambda c: c.cost)
+            self.logger.info(f"规则决策: 出牌 [{card.name}](费用{card.cost}, 策略={play_strategy})")
             return {
                 "action": "play_card",
                 "card_index": game_state.hand_cards.index(card),
                 "target_index": None,
                 "target_type": None,
-                "reason": f"规则引擎: 出[{card.name}]",
+                "reason": f"规则引擎: 出[{card.name}](费{card.cost})",
             }
 
+        # 2) 随从攻击
         attackable = [m for m in game_state.our_minions if m.can_attack]
         if attackable:
-            if game_state.opponent_minions:
-                target = game_state.opponent_minions[0]
-                self.logger.info("规则决策: 随从攻击敌方随从")
-                return {
-                    "action": "attack",
-                    "card_index": None,
-                    "target_index": 0,
-                    "target_type": "enemy_minion",
-                    "reason": "规则引擎: 随从攻击",
-                }
-            self.logger.info("规则决策: 随从攻击敌方英雄")
+            decision = self._decide_attack_target(game_state, attackable)
+            if decision:
+                return decision
+
+        # 3) 英雄技能
+        if use_hp and game_state.our_mana >= 2:
+            self.logger.info("规则决策: 使用英雄技能")
             return {
-                "action": "attack",
+                "action": "use_hero_power",
                 "card_index": None,
                 "target_index": None,
-                "target_type": "enemy_hero",
-                "reason": "规则引擎: 攻击敌方英雄",
+                "target_type": None,
+                "reason": "规则引擎: 使用英雄技能(剩余{mana}费)".format(mana=game_state.our_mana),
             }
 
         self.logger.info("规则决策: 结束回合")
-        return {"action": "end_turn", "card_index": None, "target_index": None, "target_type": None, "reason": "规则引擎: 无操作可做"}
+        return {"action": "end_turn", "card_index": None, "target_index": None,
+                "target_type": None, "reason": "规则引擎: 无操作可做"}
 
+    def _decide_attack_target(
+        self, game_state: GameState, attackable: List[MinionInfo]
+    ) -> Optional[Dict]:
+        rule_cfg = self.cfg.get("rule_engine", {})
+        attack_strategy = rule_cfg.get("attack_strategy", "smart")
+        defend_lethal = rule_cfg.get("defend_when_lethal", True)
+        lethal_margin = rule_cfg.get("lethal_margin", 2)
+        opponent_minions = game_state.opponent_minions
+
+        # --- 无敌方随从：直接打脸 ---
+        if not opponent_minions:
+            self.logger.info("规则决策: 随从攻击敌方英雄")
+            return {
+                "action": "attack", "card_index": None,
+                "target_index": None, "target_type": "enemy_hero",
+                "reason": "规则引擎: 攻击敌方英雄",
+            }
+
+        # --- face_only 策略 ---
+        if attack_strategy == "face_only":
+            self.logger.info("规则决策: 攻击敌方英雄 (face_only)")
+            return {
+                "action": "attack", "card_index": None,
+                "target_index": None, "target_type": "enemy_hero",
+                "reason": "规则引擎: face_only 攻击英雄",
+            }
+
+        # --- trade_only 策略 ---
+        if attack_strategy == "trade_only":
+            best_target = self._pick_best_trade(attackable, opponent_minions)
+            if best_target is not None:
+                self.logger.info(f"规则决策: 解场 随从[{best_target}] (trade_only)")
+                return {
+                    "action": "attack", "card_index": None,
+                    "target_index": best_target, "target_type": "enemy_minion",
+                    "reason": f"规则引擎: trade_only 解场[{best_target}]",
+                }
+
+        # --- smart 策略 ---
+        # 计算敌方场攻
+        enemy_board_damage = sum(m.attack for m in opponent_minions)
+        our_health = game_state.our_health
+
+        # 计算我方场攻（仅可攻击的）
+        our_board_damage = sum(m.attack for m in attackable)
+        enemy_health = game_state.opponent_health
+
+        # 危险判断：敌方场攻 > 我方血量 + 余量
+        in_danger = defend_lethal and (enemy_board_damage >= our_health + lethal_margin)
+
+        # 斩杀判断：我方场攻 >= 敌方血量
+        has_lethal_on_enemy = our_board_damage >= enemy_health
+
+        if in_danger:
+            best_target = self._pick_best_trade(attackable, opponent_minions)
+            self.logger.info(
+                f"规则决策: 危险! 敌方场攻={enemy_board_damage} vs 血量={our_health}，优先解场"
+            )
+            return {
+                "action": "attack", "card_index": None,
+                "target_index": best_target, "target_type": "enemy_minion",
+                "reason": f"规则引擎: 危险解场 [{enemy_board_damage}>{our_health}]",
+            }
+
+        if has_lethal_on_enemy:
+            self.logger.info(
+                f"规则决策: 斩杀! 场攻={our_board_damage} >= 敌血={enemy_health}"
+            )
+            return {
+                "action": "attack", "card_index": None,
+                "target_index": None, "target_type": "enemy_hero",
+                "reason": f"规则引擎: 斩杀 场攻{our_board_damage}>={enemy_health}",
+            }
+
+        # 常规：聪明地选择目标
+        # 如果有高威胁随从（高攻击力），优先解
+        high_threat = [m for m in opponent_minions if m.attack >= 4]
+        if high_threat:
+            best_target = self._pick_best_trade(attackable, opponent_minions,
+                                                 prefer_high_attack=True)
+            self.logger.info(f"规则决策: 解高威胁随从")
+            return {
+                "action": "attack", "card_index": None,
+                "target_index": best_target, "target_type": "enemy_minion",
+                "reason": "规则引擎: 解高威胁随从",
+            }
+
+        # 无威胁 → 打脸
+        self.logger.info("规则决策: 攻击敌方英雄")
+        return {
+            "action": "attack", "card_index": None,
+            "target_index": None, "target_type": "enemy_hero",
+            "reason": "规则引擎: 攻击英雄(无敌方威胁)",
+        }
+
+    def _pick_best_trade(
+        self,
+        attackers: List[MinionInfo],
+        defenders: List[MinionInfo],
+        prefer_high_attack: bool = False,
+    ) -> Optional[int]:
+        """选择最优解场目标，返回敌方随从在列表中的索引。"""
+        if not defenders:
+            return None
+
+        if prefer_high_attack:
+            # 优先打攻击力最高的
+            best_idx = 0
+            best_attack = -1
+            for i, m in enumerate(defenders):
+                if m.attack > best_attack:
+                    best_attack = m.attack
+                    best_idx = i
+            return best_idx
+
+        # 常规：找能白吃的（用攻击力大于敌方血量的去打），否则打最弱的
+        attackers_sorted = sorted(attackers, key=lambda m: m.attack)
+        defenders_indexed = [(i, m) for i, m in enumerate(defenders)]
+        defenders_sorted = sorted(defenders_indexed, key=lambda x: x[1].health)
+
+        for di, defender in defenders_sorted:
+            for attacker in attackers_sorted:
+                if attacker.attack >= defender.health:
+                    return di
+
+        return defenders_sorted[0][0]
+
+    def build_attack_plan(self, game_state: GameState) -> List[Dict]:
+        orders = []
+        rule_cfg = self.cfg.get("rule_engine", {})
+        attack_strategy = rule_cfg.get("attack_strategy", "smart")
+        defend_lethal = rule_cfg.get("defend_when_lethal", True)
+        lethal_margin = rule_cfg.get("lethal_margin", 2)
+
+        attackable = [m for m in game_state.our_minions if m.can_attack]
+        if not attackable:
+            return orders
+
+        opponent_minions = list(game_state.opponent_minions)
+
+        # 先打脸策略
+        if attack_strategy == "face_only" or not opponent_minions:
+            for i, _ in enumerate(attackable):
+                orders.append({"attacker_index": i, "target_index": None, "target_type": "enemy_hero"})
+            return orders
+
+        # 计算危险度
+        enemy_board_damage = sum(m.attack for m in opponent_minions)
+        in_danger = defend_lethal and (enemy_board_damage >= game_state.our_health + lethal_margin)
+        our_board_damage = sum(m.attack for m in attackable)
+        has_lethal = our_board_damage >= game_state.opponent_health
+
+        # 斩杀 → 全打脸
+        if has_lethal and not in_danger:
+            for i, _ in enumerate(attackable):
+                orders.append({"attacker_index": i, "target_index": None, "target_type": "enemy_hero"})
+            return orders
+
+        # 解场 + 打脸混合
+        remaining_attackers = list(range(len(attackable)))
+        remaining_defenders = list(range(len(opponent_minions)))
+
+        # 每轮找一个最优交换
+        while remaining_attackers and remaining_defenders:
+            best_pair = None
+            best_efficiency = float("inf")
+
+            for ai in remaining_attackers:
+                a = attackable[ai]
+                for di in remaining_defenders:
+                    d = opponent_minions[di]
+                    # 效率 = 对攻击者的伤害 / 消灭的敌方攻击力
+                    damage_to_attacker = max(0, d.attack - a.health) if d.attack > 0 else 0
+                    if d.health <= a.attack:
+                        efficiency = damage_to_attacker / max(d.attack, 1)
+                        if efficiency < best_efficiency:
+                            best_efficiency = efficiency
+                            best_pair = (ai, di)
+
+            if best_pair is None:
+                break
+
+            ai, di = best_pair
+            orders.append({"attacker_index": ai, "target_index": di, "target_type": "enemy_minion"})
+            remaining_attackers.remove(ai)
+            remaining_defenders.remove(di)
+
+        # 剩余攻击者打脸
+        for ai in remaining_attackers:
+            orders.append({"attacker_index": ai, "target_index": None, "target_type": "enemy_hero"})
+
+        return orders
+
+    # ================================================================
+    #  大模型决策 (LLM)
+    # ================================================================
     def _llm_decide(self, game_state: GameState) -> Dict:
         payload = self._build_llm_payload(game_state)
         for attempt in range(self.max_retries + 1):
@@ -120,7 +325,7 @@ class DecisionMaker:
         }
 
     def _state_to_text(self, game_state: GameState) -> str:
-        lines = [f"## 当前游戏状态"]
+        lines = ["## 当前游戏状态"]
         lines.append(f"回合: {'我方' if game_state.is_our_turn else '敌方'}")
         lines.append(f"我方英雄血量: {game_state.our_health}")
         lines.append(f"敌方英雄血量: {game_state.opponent_health}")
@@ -162,23 +367,3 @@ class DecisionMaker:
         })
         if len(self.memory) > self.max_memory_len:
             self.memory.pop(0)
-
-    def build_attack_plan(self, game_state: GameState) -> List[Dict]:
-        orders = []
-        for i, minion in enumerate(game_state.our_minions):
-            if minion.can_attack:
-                if game_state.opponent_minions:
-                    for j, enemy in enumerate(game_state.opponent_minions):
-                        orders.append({
-                            "attacker_index": i,
-                            "target_index": j,
-                            "target_type": "enemy_minion",
-                        })
-                    break
-                else:
-                    orders.append({
-                        "attacker_index": i,
-                        "target_index": None,
-                        "target_type": "enemy_hero",
-                    })
-        return orders

@@ -41,6 +41,8 @@ class GameState:
     opponent_minions: List[MinionInfo] = field(default_factory=list)
     has_end_turn_button: bool = False
     is_game_over: bool = False
+    is_post_game: bool = False
+    is_main_menu: bool = False
     screenshot: Optional[np.ndarray] = None
     timestamp: float = 0.0
 
@@ -49,12 +51,25 @@ class StateRecognizer:
     def __init__(self, config: dict):
         self.cfg = config
         self.logger = HsBatLogger().get_logger("StateRecognizer")
+        self._auto_detect_screen_size()
         self.scale = config["screen"]["scale"]
         self.ocr_lang = config["ocr"].get("lang", "eng")
         self.card_cost_offset = config["ocr"]["card_cost_offset"]
 
         self.tesseract_available = self._check_tesseract()
         self._load_templates()
+        self._debug_dir = config["debug"].get("screenshot_dir", "screenshots")
+        self._last_debug_save = 0.0
+
+    def _auto_detect_screen_size(self):
+        region = self.cfg["screen"]["game_region"]
+        w = region.get("width", 0)
+        h = region.get("height", 0)
+        if w <= 0 or h <= 0:
+            screen_w, screen_h = pyautogui.size()
+            region["width"] = screen_w
+            region["height"] = screen_h
+            self.logger.info(f"自动检测屏幕分辨率: {screen_w} x {screen_h}")
 
     def _check_tesseract(self) -> bool:
         ocr_cfg = self.cfg["ocr"]
@@ -102,7 +117,6 @@ class StateRecognizer:
         self.templates = {}
         template_names = {
             "end_turn": self.cfg["templates"]["end_turn_button"],
-            "attack": self.cfg["templates"]["attack_button"],
         }
         for key, filename in template_names.items():
             path = os.path.join(templates_dir, filename)
@@ -141,9 +155,27 @@ class StateRecognizer:
             return True, (max_loc[0], max_loc[1], max_loc[0] + w, max_loc[1] + h)
         return False, (0, 0, 0, 0)
 
+    def _fractional_to_pixels(self, region: list, img_w: int, img_h: int) -> list:
+        if not region or len(region) < 2:
+            return region
+        if all(0 <= v <= 1 for v in region):
+            converted = []
+            for i, v in enumerate(region):
+                if i % 2 == 0:
+                    converted.append(int(v * img_w))
+                else:
+                    converted.append(int(v * img_h))
+            return converted
+        return region
+
+    def _game_region_pixels(self, key: str, img: np.ndarray) -> list:
+        region = self.cfg["game"].get(key, [0, 0, 0, 0])
+        h, w = img.shape[:2]
+        return self._fractional_to_pixels(region, w, h)
+
     def _extract_mana(self, img: np.ndarray) -> Tuple[int, int]:
         try:
-            region = self.cfg["game"]["mana_region"]
+            region = self._game_region_pixels("mana_region", img)
             x, y, w, h = region
             roi = img[y : y + h, x : x + w]
 
@@ -160,7 +192,8 @@ class StateRecognizer:
 
             for cnt in contours:
                 area = cv2.contourArea(cnt)
-                if area < 30:
+                min_area = int(0.000014 * img.shape[0] * img.shape[1])
+                if area < min_area:
                     continue
                 total_crystals += 1
                 filled_crystals += 1
@@ -172,7 +205,7 @@ class StateRecognizer:
 
     def _extract_health(self, img: np.ndarray, region_key: str) -> int:
         try:
-            region = self.cfg["game"][region_key]
+            region = self._game_region_pixels(region_key, img)
             x, y, w, h = region
             roi = img[y : y + h, x : x + w]
             gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
@@ -189,7 +222,7 @@ class StateRecognizer:
     def _detect_hand_cards(self, img: np.ndarray) -> List[CardInfo]:
         cards = []
         try:
-            region = self.cfg["game"]["hand_card_region"]
+            region = self._game_region_pixels("hand_card_region", img)
             hx, hy, hw, hh = region
             roi = img[hy : hy + hh, hx : hx + hw]
 
@@ -204,7 +237,9 @@ class StateRecognizer:
             card_rects = []
             for cnt in contours:
                 x, y, w, h = cv2.boundingRect(cnt)
-                if w > 50 and h > 100 and h < hh * 1.5:
+                min_card_w = int(0.026 * img.shape[1])
+                min_card_h = int(0.093 * img.shape[0])
+                if w > min_card_w and h > min_card_h and h < hh * 1.5:
                     card_rects.append((x + hx, y + hy, w, h))
 
             card_rects.sort(key=lambda r: r[0])
@@ -220,13 +255,13 @@ class StateRecognizer:
 
         return cards
 
-    def _merge_overlapping(self, rects: List[Tuple[int, int, int, int]]) -> List[Tuple[int, int, int, int]]:
+    def _merge_overlapping(self, rects: List[Tuple[int, int, int, int]], gap: int = 20) -> List[Tuple[int, int, int, int]]:
         if not rects:
             return []
         merged = []
         current = rects[0]
         for r in rects[1:]:
-            if r[0] - (current[0] + current[2]) < 20:
+            if r[0] - (current[0] + current[2]) < gap:
                 new_w = max(current[0] + current[2], r[0] + r[2]) - current[0]
                 current = (current[0], current[1], new_w, max(current[3], r[3]))
             else:
@@ -265,10 +300,13 @@ class StateRecognizer:
         if not self.tesseract_available:
             return "unknown"
         try:
-            name_x = cx - 20
+            img_h, img_w = img.shape[:2]
+            name_offset_x = int(0.01 * img_w)
+            name_offset_w = int(0.021 * img_w)
+            name_h = int(0.023 * img_h)
+            name_x = cx - name_offset_x
             name_y = cy + int(ch * 0.75)
-            name_w = cw + 40
-            name_h = 25
+            name_w = cw + name_offset_w
             name_x = max(0, name_x)
             name_y = max(0, name_y)
 
@@ -291,8 +329,8 @@ class StateRecognizer:
             our_zone = img[int(h * 0.6) : int(h * 0.8), int(w * 0.1) : int(w * 0.9)]
             opp_zone = img[int(h * 0.1) : int(h * 0.35), int(w * 0.1) : int(w * 0.9)]
 
-            our_minions = self._find_minions_in_zone(our_zone, int(h * 0.6), int(w * 0.1))
-            opponent_minions = self._find_minions_in_zone(opp_zone, int(h * 0.1), int(w * 0.1))
+            our_minions = self._find_minions_in_zone(our_zone, int(h * 0.6), int(w * 0.1), img)
+            opponent_minions = self._find_minions_in_zone(opp_zone, int(h * 0.1), int(w * 0.1), img)
 
         except Exception as e:
             self.logger.error(f"随从识别失败: {e}")
@@ -300,7 +338,7 @@ class StateRecognizer:
         return our_minions, opponent_minions
 
     def _find_minions_in_zone(
-        self, zone: np.ndarray, offset_y: int, offset_x: int
+        self, zone: np.ndarray, offset_y: int, offset_x: int, full_img: np.ndarray
     ) -> List[MinionInfo]:
         minions = []
         gray = cv2.cvtColor(zone, cv2.COLOR_BGR2GRAY)
@@ -309,32 +347,73 @@ class StateRecognizer:
         edges = cv2.dilate(edges, kernel, iterations=2)
         contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
+        img_h, img_w = full_img.shape[:2]
+        min_w = int(self.cfg["game"].get("minion_min_size", [0.016, 0.037])[0] * img_w)
+        min_h = int(self.cfg["game"].get("minion_min_size", [0.016, 0.037])[1] * img_h)
+        max_w = int(self.cfg["game"].get("minion_max_size", [0.104, 0.278])[0] * img_w)
+        max_h = int(self.cfg["game"].get("minion_max_size", [0.104, 0.278])[1] * img_h)
+        ocr_w = int(self.cfg["game"].get("minion_ocr_size", [0.016, 0.019])[0] * img_w)
+        ocr_h = int(self.cfg["game"].get("minion_ocr_size", [0.016, 0.019])[1] * img_h)
+        merge_gap = int(0.01 * img_w)
+
         rects = []
         for cnt in contours:
             x, y, w, h = cv2.boundingRect(cnt)
-            if w > 30 and h > 40 and w < 200 and h < 300:
+            if w > min_w and h > min_h and w < max_w and h < max_h:
                 rects.append((x, y, w, h))
 
         rects.sort(key=lambda r: r[0])
-        merged = self._merge_overlapping(rects)
+        merged = self._merge_overlapping(rects, merge_gap)
 
         for mx, my, mw, mh in merged:
             abs_x = mx + offset_x
             abs_y = my + offset_y
-            attack_roi = zone[my : my + 20, mx : mx + 30]
-            health_roi = zone[my : my + 20, mx + mw - 30 : mx + mw]
+            attack_roi = zone[my : my + ocr_h, mx : mx + ocr_w]
+            health_roi = zone[my : my + ocr_h, mx + mw - ocr_w : mx + mw]
             attack = self._ocr_number_from_roi(attack_roi)
             health = self._ocr_number_from_roi(health_roi)
+            can_attack = self._detect_attackable_green_border(
+                full_img, abs_x, abs_y, mw, mh
+            )
             minions.append(
                 MinionInfo(
                     health=health,
                     attack=attack,
                     position=(abs_x, abs_y, abs_x + mw, abs_y + mh),
-                    can_attack=False,
+                    can_attack=can_attack,
                 )
             )
 
         return minions
+
+    def _detect_attackable_green_border(
+        self, img: np.ndarray, minion_x: int, minion_y: int, minion_w: int, minion_h: int
+    ) -> bool:
+        try:
+            border_w = self.cfg["game"].get("attackable_green_border_width", 8)
+            green_lower = np.array(self.cfg["game"]["attackable_green_lower"], dtype=np.uint8)
+            green_upper = np.array(self.cfg["game"]["attackable_green_upper"], dtype=np.uint8)
+            min_ratio = self.cfg["game"].get("attackable_green_min_ratio", 0.08)
+
+            bx1 = max(0, minion_x - border_w)
+            by1 = max(0, minion_y - border_w)
+            bx2 = min(img.shape[1], minion_x + minion_w + border_w)
+            by2 = min(img.shape[0], minion_y + minion_h + border_w)
+
+            if bx2 <= bx1 or by2 <= by1:
+                return False
+
+            border_region = img[by1:by2, bx1:bx2]
+            hsv = cv2.cvtColor(border_region, cv2.COLOR_BGR2HSV)
+            mask = cv2.inRange(hsv, green_lower, green_upper)
+            total_pixels = mask.size
+            if total_pixels == 0:
+                return False
+            green_pixels = cv2.countNonZero(mask)
+            ratio = green_pixels / total_pixels
+            return ratio >= min_ratio
+        except Exception:
+            return False
 
     def _ocr_number_from_roi(self, roi: np.ndarray) -> int:
         if not self.tesseract_available:
@@ -354,7 +433,7 @@ class StateRecognizer:
         if not self.tesseract_available:
             return self.detect_end_turn_button(img)
         try:
-            region = self.cfg["game"]["turn_indicator_region"]
+            region = self._game_region_pixels("turn_indicator_region", img)
             x, y, w, h = region
             roi = img[y : y + h, x : x + w]
             gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
@@ -388,6 +467,116 @@ class StateRecognizer:
         except Exception:
             return False
 
+    def detect_game_over(self, img: np.ndarray) -> bool:
+        our_health = self._extract_health(img, "health_region")
+        opp_health = self._extract_health(img, "enemy_health_region")
+        has_btn = self.detect_end_turn_button(img)
+
+        if our_health == 0 and opp_health == 0 and not has_btn:
+            return True
+
+        if not self.tesseract_available:
+            return False
+
+        try:
+            h, w = img.shape[:2]
+            center_roi = img[int(h * 0.35):int(h * 0.65), int(w * 0.3):int(w * 0.7)]
+            gray = cv2.cvtColor(center_roi, cv2.COLOR_BGR2GRAY)
+            _, thresh = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY)
+            text = self._safe_ocr(thresh, config="--psm 6")
+            text_lower = text.strip().lower()
+            for kw in ["胜利", "失败", "victory", "defeat", "you win", "you lose",
+                        "经验", "exp"]:
+                if kw in text_lower:
+                    return True
+        except Exception:
+            pass
+        return False
+
+    def detect_main_menu(self, img: np.ndarray) -> bool:
+        region = self.cfg["game"].get("play_button_region", [0.36, 0.56, 0.27, 0.06])
+        if not region or len(region) < 4:
+            return False
+        region = self._game_region_pixels("play_button_region", img)
+        x, y, w_box, h_box = region[0], region[1], region[2], region[3]
+        if not self.tesseract_available:
+            return False
+        try:
+            roi = img[y:y + h_box, x:x + w_box]
+            gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+            _, thresh = cv2.threshold(gray, 200, 255, cv2.THRESH_BINARY)
+            text = self._safe_ocr(thresh, config="--psm 6")
+            text_lower = text.strip().lower()
+            for kw in ["play", "开始", "对战", "排位", "休闲", "hplay", "bplay",
+                        "standard", "wild", "casual", "ranked"]:
+                if kw in text_lower:
+                    return True
+        except Exception:
+            pass
+        return False
+
+    def detect_post_game(self, img: np.ndarray) -> bool:
+        if self.detect_game_over(img):
+            return True
+        our_health = self._extract_health(img, "health_region")
+        opp_health = self._extract_health(img, "enemy_health_region")
+        has_btn = self.detect_end_turn_button(img)
+        if our_health == 0 and opp_health == 0 and not has_btn:
+            return True
+        return False
+
+    def _save_debug_crops(self, img: np.ndarray, game_state: GameState):
+        if not self.cfg["debug"].get("save_screenshots", False):
+            return
+        now = time.time()
+        if now - self._last_debug_save < 1.5:
+            return
+        self._last_debug_save = now
+
+        out_dir = os.path.join(self._debug_dir, "latest")
+        os.makedirs(out_dir, exist_ok=True)
+
+        def _save(name, roi):
+            path = os.path.join(out_dir, f"{name}.png")
+            try:
+                cv2.imwrite(path, roi)
+            except Exception:
+                pass
+
+        _save("00_full", img)
+        full_path = os.path.join(self._debug_dir, "latest_full.png")
+        try:
+            cv2.imwrite(full_path, img)
+        except Exception:
+            pass
+
+        keys = ["mana_region", "health_region", "enemy_health_region",
+                "hand_card_region", "turn_indicator_region"]
+        for key in keys:
+            region = self._game_region_pixels(key, img)
+            x, y, w, h = region
+            if w > 0 and h > 0:
+                roi = img[y:y + h, x:x + w]
+                _save(key, roi)
+
+        for i, card in enumerate(game_state.hand_cards):
+            x1, y1, x2, y2 = card.position
+            if x2 > x1 and y2 > y1:
+                _save(f"card_{i:02d}_{card.name}", img[y1:y2, x1:x2])
+
+        for i, m in enumerate(game_state.our_minions):
+            x1, y1, x2, y2 = m.position
+            if x2 > x1 and y2 > y1:
+                tag = "atk" if m.can_attack else "idle"
+                _save(f"our_minion_{i:02d}_{tag}", img[y1:y2, x1:x2])
+
+        for i, m in enumerate(game_state.opponent_minions):
+            x1, y1, x2, y2 = m.position
+            if x2 > x1 and y2 > y1:
+                _save(f"opp_minion_{i:02d}", img[y1:y2, x1:x2])
+
+        self.logger.debug(f"调试截图已保存: {out_dir}")
+
     def recognize(self) -> GameState:
         img = self.capture_screen()
         game_state = GameState(screenshot=img, timestamp=time.time())
@@ -399,6 +588,9 @@ class StateRecognizer:
         game_state.hand_cards = self._detect_hand_cards(img)
         game_state.our_minions, game_state.opponent_minions = self._detect_minions(img)
         game_state.has_end_turn_button = self.detect_end_turn_button(img)
+        game_state.is_game_over = self.detect_game_over(img)
+        game_state.is_post_game = game_state.is_game_over
+        game_state.is_main_menu = self.detect_main_menu(img)
 
         mana = game_state.our_mana
         for card in game_state.hand_cards:
@@ -411,5 +603,7 @@ class StateRecognizer:
             f"手牌={len(game_state.hand_cards)}张 "
             f"我方随从={len(game_state.our_minions)} 敌方随从={len(game_state.opponent_minions)}"
         )
+
+        self._save_debug_crops(img, game_state)
 
         return game_state

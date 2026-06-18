@@ -16,17 +16,15 @@ HsBat/
 ├── requirements.txt         # 依赖
 ├── README.md
 ├── templates/               # 模板图片目录（用户自行截取）
-│   ├── end_turn.png         # 结束回合按钮
-│   └── attack.png           # 攻击按钮
+│   └── end_turn.png         # 结束回合按钮（可选，提供则用模板匹配，否则走 OCR）
 ├── src/
 │   ├── __init__.py
 │   ├── state_recognizer.py  # 模块1: 快速状态识别 (OpenCV + OCR)
 │   ├── decision_maker.py    # 模块2: 策略决策 (规则引擎 + 大模型 API)
 │   ├── action_executor.py   # 模块3: 动作执行 (PyAutoGUI + 贝塞尔曲线)
 │   ├── game_controller.py   # 主控制器 - 游戏循环调度
-│   ├── debug_ui.py          # 调试可视化 (OpenCV 窗口)
 │   └── logger.py            # 日志模块
-└── logs/                    # 日志输出目录
+├── screenshots/             # 调试截图输出目录（按时间戳命名）
 ```
 
 ## 系统要求
@@ -57,8 +55,9 @@ pip install -r requirements.txt
 
 | 文件名 | 说明 | 建议 |
 |--------|------|------|
-| `end_turn.png` | 结束回合按钮截图 | 截取完整的按钮区域 |
-| `attack.png` | 攻击按钮截图 | 截取完整的按钮区域 |
+| `end_turn.png` | 结束回合按钮截图 | 截取右下角蓝色"结束回合"按钮区域 |
+
+> **注意**：炉石传说中没有独立的"攻击按钮"，可攻击的随从通过**绿色边框光晕**来表示。程序通过 HSV 颜色检测自动识别绿色边框，无需额外模板。
 
 ### 4. 配置大模型 API (可选)
 
@@ -111,12 +110,13 @@ python main.py --dry-run
 
 ### 模块 1: 状态识别 (StateRecognizer)
 
-- **模板匹配**: 使用 `cv2.matchTemplate` 识别按钮
+- **模板匹配**: 使用 `cv2.matchTemplate` 识别结束回合按钮
+- **绿色边框检测**: HSV 颜色空间检测可攻击随从的绿色边框光晕
 - **法力水晶识别**: 颜色阈值 + 轮廓检测
 - **血量识别**: OCR 数字识别
 - **手牌检测**: Canny 边缘检测 + 轮廓分析
 - **随从检测**: 区域边缘检测 + OCR 攻防数值
-- **回合判断**: OC视觉识别回合文字
+- **回合判断**: OCR 识别回合文字（无 Tesseract 时通过按钮隐藏判断）
 
 ### 模块 2: 策略决策 (DecisionMaker)
 
@@ -138,13 +138,15 @@ python main.py --dry-run
 - **拖拽出牌**: 模拟从手牌拖拽到战场的操作
 - **Failsafe**: 鼠标移到左上角可紧急停止
 
-### 调试可视化窗口
+### 调试截图
 
-- 显示实时游戏画面 + 识别标注
-- 快捷键:
-  - `q`: 关闭调试窗口
-  - `s`: 保存当前调试截图
-  - `Space`: 暂停/继续
+启用 `debug.save_screenshots: true` 后，每次状态识别会覆盖写入 `screenshots/latest/` 目录：
+- `00_full.png` — 完整截图
+- `mana_region.png` / `health_region.png` 等 — 各识别区域裁剪
+- `card_XX_牌名.png` — 每张手牌裁剪
+- `our_minion_XX_atk.png` / `opp_minion_XX.png` — 每个随从裁剪
+
+同时会在 `screenshots/` 下存一份 `latest_full.png`，每次覆盖。
 
 ## 配置说明
 
@@ -158,7 +160,7 @@ python main.py --dry-run
 | `llm.api_base` | API 地址 | https://api.openai.com/v1 |
 | `llm.model` | 模型名称 | gpt-4o |
 | `action.bezier_points` | 贝塞尔曲线点数 | 20 |
-| `debug.show_debug_window` | 显示调试窗口 | true |
+| `debug.save_screenshots` | 保存调试区域截图 | true |
 
 ## 安全提示
 

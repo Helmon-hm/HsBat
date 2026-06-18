@@ -2,16 +2,13 @@ screen:
   game_region:
     x: 0
     y: 0
-    width: 1920
-    height: 1080
+    width: 0
+    height: 0
   scale: 1.0
 templates:
   directory: templates
   match_threshold: 0.75
   end_turn_button: end_turn.png
-  our_turn_indicator: our_turn.png
-  attack_button: attack.png
-  confirm_button: confirm.png
 ocr:
   tesseract_path: C:\Program Files\Tesseract-OCR\tesseract.exe
   lang: eng+chi_sim
@@ -23,7 +20,7 @@ ocr:
 llm:
   enabled: true
   provider: openai_compatible
-  api_key: ""  # 通过环境变量 HSBAT_LLM_API_KEY 设置，或直接在 GUI 中填写
+  api_key: ''
   api_base: https://api.openai.com/v1
   model: gpt-4o
   timeout: 15
@@ -55,42 +52,36 @@ action:
     max: 120
   bezier_points: 20
 game:
-  mana_region:
-  - 70
-  - 30
-  - 120
-  - 50
-  health_region:
-  - 870
-  - 965
-  - 180
-  - 40
-  enemy_health_region:
-  - 870
-  - 75
-  - 180
-  - 40
-  hand_card_region:
-  - 160
-  - 920
-  - 1600
-  - 160
-  mana_color_lower:
-  - 200
-  - 180
-  - 50
-  mana_color_upper:
-  - 255
-  - 230
-  - 130
-  turn_indicator_region:
-  - 800
-  - 480
-  - 320
-  - 120
+  # --- 区域识别（相对百分比 0.0~1.0，适配任意分辨率）---
+  # 法力水晶位于画面右下角，英雄头像旁边
+  mana_region: [0.81, 0.84, 0.08, 0.03]
+  health_region: [0.453, 0.894, 0.094, 0.037]
+  enemy_health_region: [0.453, 0.069, 0.094, 0.037]
+  hand_card_region: [0.083, 0.852, 0.833, 0.148]
+  turn_indicator_region: [0.417, 0.444, 0.167, 0.111]
+  # --- 颜色阈值 (不受分辨率影响) ---
+  mana_color_lower: [200, 180, 50]
+  mana_color_upper: [255, 230, 130]
+  attackable_green_lower: [40, 80, 80]
+  attackable_green_upper: [90, 255, 255]
+  # --- 像素阈值 (以实际图片尺寸为基准自适应) ---
+  attackable_green_border_width: 8
+  attackable_green_min_ratio: 0.08
+  minion_min_size: [0.016, 0.037]
+  minion_max_size: [0.104, 0.278]
+  minion_ocr_size: [0.016, 0.019]
+  # --- 对局结束/重排队 ---
+  auto_requeue: true
+  post_game_click_region: [0.21, 0.60]
+  play_button_region: [0.36, 0.56, 0.27, 0.06]
+rule_engine:
+  play_card_strategy: low_cost_first
+  attack_strategy: face_only
+  defend_when_lethal: true
+  lethal_margin: 2
+  use_hero_power: true
 debug:
   enabled: true
-  show_debug_window: true
   save_screenshots: true
   screenshot_dir: screenshots
   log_level: DEBUG

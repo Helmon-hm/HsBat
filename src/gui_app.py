@@ -10,7 +10,6 @@ import yaml
 
 from src.game_controller import GameController
 from src.logger import HsBatLogger
-from src.debug_ui import DebugUI
 from src.paths import get_project_root, get_resource_path
 
 try:
@@ -35,8 +34,8 @@ class HsBatGUI:
     def __init__(self):
         self.root = tk.Tk()
         self.root.title("HsBat - 炉石传说自动化")
-        self.root.geometry("840x680")
-        self.root.minsize(720, 560)
+        self.root.geometry("960x1050")
+        self.root.minsize(820, 800)
         self._tray_icon = None
         self._minimize_to_tray = False
 
@@ -45,7 +44,6 @@ class HsBatGUI:
 
         self.controller: GameController = None
         self.controller_thread: threading.Thread = None
-        self.debug_ui: DebugUI = None
         self.bot_running = False
 
         self.log_queue = queue.Queue()
@@ -55,19 +53,36 @@ class HsBatGUI:
         self._load_config_to_ui()
         self._poll_log_queue()
 
+    def _get_screen_size(self):
+        try:
+            import pyautogui
+            return pyautogui.size()
+        except Exception:
+            return (1920, 1080)
+
+    def _auto_detect_screen(self, cfg: dict):
+        region = cfg.setdefault("screen", {}).setdefault("game_region", {})
+        if region.get("width", 0) <= 0 or region.get("height", 0) <= 0:
+            sw, sh = self._get_screen_size()
+            region["width"] = sw
+            region["height"] = sh
+
     def _load_config(self) -> dict:
         cfg_path = self.config_path
         if os.path.exists(cfg_path):
             with open(cfg_path, "r", encoding="utf-8") as f:
-                return yaml.safe_load(f)
-        bundled = get_resource_path("config.yaml")
-        if os.path.exists(bundled):
-            with open(bundled, "r", encoding="utf-8") as f:
-                cfg = yaml.safe_load(f)
-            with open(cfg_path, "w", encoding="utf-8") as f:
-                yaml.dump(cfg, f, allow_unicode=True, default_flow_style=False, sort_keys=False, indent=2)
-            return cfg
-        return {}
+                cfg = yaml.safe_load(f) or {}
+        else:
+            bundled = get_resource_path("config.yaml")
+            if os.path.exists(bundled):
+                with open(bundled, "r", encoding="utf-8") as f:
+                    cfg = yaml.safe_load(f) or {}
+                with open(cfg_path, "w", encoding="utf-8") as f:
+                    yaml.dump(cfg, f, allow_unicode=True, default_flow_style=False, sort_keys=False, indent=2)
+            else:
+                cfg = {}
+        self._auto_detect_screen(cfg)
+        return cfg
 
     def _save_config(self):
         path = self.config_path
@@ -146,9 +161,9 @@ class HsBatGUI:
         self.dry_run_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(opt_frame, text="模拟运行 (只识别不动手，适合测试识别效果)",
                          variable=self.dry_run_var).pack(anchor="w", pady=1)
-        self.debug_window_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(opt_frame, text="显示 OpenCV 调试窗口",
-                         variable=self.debug_window_var).pack(anchor="w", pady=1)
+        self.auto_requeue_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(opt_frame, text="对局结束后自动开始下一局",
+                         variable=self.auto_requeue_var).pack(anchor="w", pady=1)
 
         # ---------- 当前游戏状态 ----------
         state_frame = ttk.LabelFrame(tab, text="当前游戏状态", padding=10)
@@ -176,8 +191,36 @@ class HsBatGUI:
 
     # ---------- 设置标签页 ----------
     def _build_settings_tab(self, notebook):
-        tab = ttk.Frame(notebook, padding=10)
-        notebook.add(tab, text="设置")
+        outer = ttk.Frame(notebook)
+        notebook.add(outer, text="设置")
+        outer.rowconfigure(0, weight=1)
+        outer.columnconfigure(0, weight=1)
+
+        canvas = tk.Canvas(outer, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(outer, orient=tk.VERTICAL, command=canvas.yview)
+        tab = ttk.Frame(canvas, padding=10)
+
+        tab.columnconfigure(0, weight=1)
+
+        canvas.create_window((0, 0), window=tab, anchor="nw", tags=("inner_win",))
+
+        def _on_frame_configure(event):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+        tab.bind("<Configure>", _on_frame_configure)
+
+        def _on_canvas_configure(event):
+            canvas.itemconfig("inner_win", width=event.width - 4)
+        canvas.bind("<Configure>", _on_canvas_configure)
+
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.grid(row=0, column=0, sticky="nsew")
+        scrollbar.grid(row=0, column=1, sticky="ns")
+
+        def _on_mousewheel(event):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        canvas.bind("<Enter>", lambda e: canvas.bind_all("<MouseWheel>", _on_mousewheel, add="+"))
+        canvas.bind("<Leave>", lambda e: canvas.unbind_all("<MouseWheel>"))
+        outer.bind("<Destroy>", lambda e: canvas.unbind_all("<MouseWheel>"))
 
         row = 0
 
@@ -258,6 +301,59 @@ class HsBatGUI:
             .grid(row=0, column=1, padx=(5, 0))
 
         row += 1
+        # ---------- 规则引擎策略 ----------
+        rule_frame = ttk.LabelFrame(tab, text="规则引擎策略（快速模式）", padding=10)
+        rule_frame.grid(row=row, column=0, sticky="ew", padx=5, pady=5)
+        rule_frame.columnconfigure(1, weight=1)
+        row += 1
+
+        ttk.Label(rule_frame, text="出牌策略:")\
+            .grid(row=0, column=0, sticky="w", padx=(0, 5), pady=2)
+        self.rule_play_var = tk.StringVar(value="high_cost_first")
+        play_frame = ttk.Frame(rule_frame)
+        play_frame.grid(row=0, column=1, sticky="ew", pady=2)
+        ttk.Radiobutton(play_frame, text="优先出高费",
+                         variable=self.rule_play_var, value="high_cost_first")\
+            .pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Radiobutton(play_frame, text="优先出低费 (铺场)",
+                         variable=self.rule_play_var, value="low_cost_first")\
+            .pack(side=tk.LEFT)
+
+        ttk.Label(rule_frame, text="攻击策略:")\
+            .grid(row=1, column=0, sticky="w", padx=(0, 5), pady=2)
+        self.rule_attack_var = tk.StringVar(value="smart")
+        attack_frame = ttk.Frame(rule_frame)
+        attack_frame.grid(row=1, column=1, sticky="ew", pady=2)
+        ttk.Radiobutton(attack_frame, text="智能", variable=self.rule_attack_var,
+                         value="smart").pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Radiobutton(attack_frame, text="只打脸", variable=self.rule_attack_var,
+                         value="face_only").pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Radiobutton(attack_frame, text="只解场", variable=self.rule_attack_var,
+                         value="trade_only").pack(side=tk.LEFT)
+
+        ttk.Label(rule_frame, text="     智能模式: 有斩杀时打脸，有威胁时解场，否则打脸",
+                  foreground="#888888")\
+            .grid(row=2, column=1, sticky="w")
+
+        self.rule_defend_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(rule_frame, text="危险时优先解场 (敌方场攻超过斩杀线时)",
+                         variable=self.rule_defend_var)\
+            .grid(row=3, column=0, columnspan=2, sticky="w", pady=(8, 2))
+
+        ttk.Label(rule_frame, text="斩杀线余量:")\
+            .grid(row=4, column=0, sticky="w", padx=(0, 5), pady=2)
+        self.rule_lethal_margin_var = tk.IntVar(value=2)
+        ttk.Spinbox(rule_frame, from_=0, to=10, textvariable=self.rule_lethal_margin_var, width=6)\
+            .grid(row=4, column=1, sticky="w", pady=2)
+        ttk.Label(rule_frame, text="  超出血量多少点触发解场", foreground="#888888")\
+            .grid(row=4, column=1, padx=(45, 0), sticky="w", pady=2)
+
+        self.rule_hero_power_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(rule_frame, text="使用英雄技能 (剩余费用 >= 2 时)",
+                         variable=self.rule_hero_power_var)\
+            .grid(row=5, column=0, columnspan=2, sticky="w", pady=2)
+
+        row += 1
         btn_frame = ttk.Frame(tab)
         btn_frame.grid(row=row, column=0, pady=10)
         ttk.Button(btn_frame, text="保存配置", command=self._save_config_ui)\
@@ -310,11 +406,22 @@ class HsBatGUI:
         self._on_decision_mode_change()
 
         screen = cfg.get("screen", {}).get("game_region", {})
-        self.screen_w_var.set(screen.get("width", 1920))
-        self.screen_h_var.set(screen.get("height", 1080))
+        sw, sh = self._get_screen_size()
+        self.screen_w_var.set(screen.get("width", sw) or sw)
+        self.screen_h_var.set(screen.get("height", sh) or sh)
 
         ocr = cfg.get("ocr", {})
         self.tesseract_path_var.set(ocr.get("tesseract_path", ""))
+
+        rule = cfg.get("rule_engine", {})
+        self.rule_play_var.set(rule.get("play_card_strategy", "high_cost_first"))
+        self.rule_attack_var.set(rule.get("attack_strategy", "smart"))
+        self.rule_defend_var.set(rule.get("defend_when_lethal", True))
+        self.rule_lethal_margin_var.set(rule.get("lethal_margin", 2))
+        self.rule_hero_power_var.set(rule.get("use_hero_power", True))
+
+        game_cfg = cfg.get("game", {})
+        self.auto_requeue_var.set(game_cfg.get("auto_requeue", True))
 
     def _ui_to_config(self):
         self.config.setdefault("llm", {})["enabled"] = (self.decision_mode_var.get() == "llm")
@@ -325,6 +432,12 @@ class HsBatGUI:
         self.config.setdefault("screen", {}).setdefault("game_region", {})["width"] = self.screen_w_var.get()
         self.config["screen"]["game_region"]["height"] = self.screen_h_var.get()
         self.config.setdefault("ocr", {})["tesseract_path"] = self.tesseract_path_var.get().strip()
+        self.config.setdefault("rule_engine", {})["play_card_strategy"] = self.rule_play_var.get()
+        self.config["rule_engine"]["attack_strategy"] = self.rule_attack_var.get()
+        self.config["rule_engine"]["defend_when_lethal"] = self.rule_defend_var.get()
+        self.config["rule_engine"]["lethal_margin"] = self.rule_lethal_margin_var.get()
+        self.config["rule_engine"]["use_hero_power"] = self.rule_hero_power_var.get()
+        self.config.setdefault("game", {})["auto_requeue"] = self.auto_requeue_var.get()
 
     def _save_config_ui(self):
         self._ui_to_config()
@@ -341,10 +454,17 @@ class HsBatGUI:
             self.api_key_var.set("")
             self.model_var.set("gpt-4o")
             self.temperature_var.set(0.3)
-            self.screen_w_var.set(1920)
-            self.screen_h_var.set(1080)
+            sw, sh = self._get_screen_size()
+            self.screen_w_var.set(sw)
+            self.screen_h_var.set(sh)
             self.tesseract_path_var.set("C:\\Program Files\\Tesseract-OCR\\tesseract.exe")
             self.temperature_label.config(text="0.3")
+            self.rule_play_var.set("high_cost_first")
+            self.rule_attack_var.set("smart")
+            self.rule_defend_var.set(True)
+            self.rule_lethal_margin_var.set(2)
+            self.rule_hero_power_var.set(True)
+            self.auto_requeue_var.set(True)
             self._on_decision_mode_change()
 
     def _start_bot(self):
@@ -367,7 +487,6 @@ class HsBatGUI:
 
         if self.dry_run_var.get():
             config.setdefault("game", {})["dry_run"] = True
-        config.setdefault("debug", {})["show_debug_window"] = self.debug_window_var.get()
 
         mode_name = "大模型决策" if config["llm"]["enabled"] else "规则引擎"
         self._append_log("INFO", "Main", f"决策模式: {mode_name}")
@@ -378,11 +497,7 @@ class HsBatGUI:
         self.stop_btn.config(state=tk.NORMAL)
         self.status_label.config(text="状态: 运行中...")
 
-        self.debug_ui = DebugUI(config)
-        if config["debug"]["show_debug_window"]:
-            self.debug_ui.start()
-
-        self.controller = GameController(config, debug_ui=self.debug_ui)
+        self.controller = GameController(config)
         self.bot_running = True
         self.controller_thread = threading.Thread(target=self._run_controller, daemon=True)
         self.controller_thread.start()
@@ -400,8 +515,6 @@ class HsBatGUI:
     def _stop_bot(self):
         if self.controller:
             self.controller.stop()
-        if self.debug_ui:
-            self.debug_ui.stop()
         self.status_label.config(text="状态: 正在停止...")
 
     def _on_bot_stopped(self):

@@ -31,7 +31,6 @@ def build():
         "--hidden-import=src.decision_maker",
         "--hidden-import=src.action_executor",
         "--hidden-import=src.game_controller",
-        "--hidden-import=src.debug_ui",
         "--hidden-import=src.logger",
         "--hidden-import=src.gui_app",
         "--hidden-import=src.paths",

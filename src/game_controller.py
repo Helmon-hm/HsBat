@@ -6,16 +6,14 @@ import cv2
 import numpy as np
 
 from src.action_executor import ActionExecutor
-from src.debug_ui import DebugUI
 from src.decision_maker import DecisionMaker
 from src.logger import HsBatLogger
 from src.state_recognizer import GameState, StateRecognizer
 
 
 class GameController:
-    def __init__(self, config: dict, debug_ui: Optional[DebugUI] = None):
+    def __init__(self, config: dict):
         self.cfg = config
-        self._debug_ui = debug_ui
         self.logger = HsBatLogger().get_logger("GameController")
         self.recognizer = StateRecognizer(config)
         self.decision_maker = DecisionMaker(config)
@@ -29,11 +27,8 @@ class GameController:
         self.running = False
         self.paused = False
         self.turn_count = 0
+        self.match_count = 0
         self.last_state: Optional[GameState] = None
-
-    def _update_debug_ui(self, game_state: GameState):
-        if self._debug_ui:
-            self._debug_ui.update_state(game_state)
 
     def run(self):
         self.running = True
@@ -61,14 +56,16 @@ class GameController:
     def _game_tick(self):
         game_state = self.recognizer.recognize()
         self.last_state = game_state
-        self._update_debug_ui(game_state)
 
         if self.debug_cfg.get("save_screenshots", False) and game_state.screenshot is not None:
             self._save_screenshot(game_state)
 
-        if game_state.is_game_over:
-            self.logger.info("游戏结束")
-            time.sleep(5)
+        if game_state.is_game_over or game_state.is_post_game:
+            self._handle_post_game(game_state)
+            return
+
+        if game_state.is_main_menu:
+            self._handle_main_menu()
             return
 
         if not game_state.is_our_turn:
@@ -79,6 +76,86 @@ class GameController:
         self.logger.info(f"\n=== 第 {self.turn_count} 回合 ===")
 
         self._execute_turn(game_state)
+
+    def _handle_post_game(self, game_state: GameState):
+        game_cfg = self.cfg.get("game", {})
+        if not game_cfg.get("auto_requeue", True):
+            self.logger.info("auto_requeue 已关闭，等待手动操作")
+            time.sleep(5)
+            return
+
+        self.logger.info("对局已结束，正在处理结算画面...")
+        self.turn_count = 0
+
+        click_region = game_cfg.get("post_game_click_region", [0.21, 0.60])
+        screen_w = self.cfg["screen"]["game_region"]["width"]
+        screen_h = self.cfg["screen"]["game_region"]["height"]
+        cx = int(click_region[0] * screen_w)
+        cy = int(click_region[1] * screen_h)
+
+        max_clicks = 10
+        for i in range(max_clicks):
+            if not self.running or self.paused:
+                return
+
+            state = self.recognizer.recognize()
+    
+            if state.is_main_menu:
+                self.logger.info("已回到主菜单")
+                self._handle_main_menu()
+                return
+
+            self.logger.info(f"点击结算画面 ({i + 1}/{max_clicks})...")
+            self.executor.click_screen_region(cx, cy)
+            time.sleep(1.5)
+
+        self.logger.warning("结算画面处理超时，尝试直接查找主菜单")
+        self._handle_main_menu()
+
+    def _handle_main_menu(self):
+        game_cfg = self.cfg.get("game", {})
+        if not game_cfg.get("auto_requeue", True):
+            self.logger.info("auto_requeue 已关闭，停留主菜单等待手动操作")
+            time.sleep(5)
+            return
+
+        self.logger.info("在主菜单，准备开始新对局...")
+        time.sleep(2)
+
+        play_region = game_cfg.get("play_button_region", [0.36, 0.56, 0.27, 0.06])
+        screen_w = self.cfg["screen"]["game_region"]["width"]
+        screen_h = self.cfg["screen"]["game_region"]["height"]
+        px = int(play_region[0] * screen_w + play_region[2] * screen_w // 2)
+        py = int(play_region[1] * screen_h + play_region[3] * screen_h // 2)
+
+        for attempt in range(8):
+            if not self.running or self.paused:
+                return
+
+            state = self.recognizer.recognize()
+    
+            if state.is_our_turn:
+                self.logger.info("检测到对局已开始!")
+                self.match_count += 1
+                self.logger.info(f"开始第 {self.match_count} 局")
+                return
+
+            if not state.is_main_menu and not state.is_game_over:
+                self.logger.info("检测到非主菜单画面，等待进入对局...")
+                time.sleep(2)
+                continue
+
+            self.logger.info(f"点击开始按钮 ({attempt + 1}/8)...")
+            self.executor.click_screen_region(px, py)
+            time.sleep(2)
+
+        state = self.recognizer.recognize()
+        if state.is_our_turn:
+            self.match_count += 1
+            self.logger.info(f"开始第 {self.match_count} 局")
+        else:
+            self.logger.warning("未能检测到对局开始，稍后重试")
+            time.sleep(5)
 
     def _wait_for_our_turn(self, game_state: GameState):
         wait_start = time.time()
@@ -91,7 +168,11 @@ class GameController:
                 return
 
             new_state = self.recognizer.recognize()
-            self._update_debug_ui(new_state)
+    
+            if new_state.is_game_over or new_state.is_post_game:
+                self._handle_post_game(new_state)
+                return
+
             if new_state.is_our_turn:
                 self.logger.info("检测到我方回合开始")
                 return
@@ -108,7 +189,11 @@ class GameController:
                 return
 
             current_state = self.recognizer.recognize()
-            self._update_debug_ui(current_state)
+    
+            if current_state.is_game_over or current_state.is_post_game:
+                self._handle_post_game(current_state)
+                return
+
             if not current_state.is_our_turn:
                 self.logger.info("回合已结束")
                 return
@@ -162,7 +247,9 @@ class GameController:
 
         if target_type == "enemy_hero":
             screen_w = self.cfg["screen"]["game_region"]["width"]
-            target_bbox = (screen_w // 2 - 30, 0, screen_w // 2 + 30, 80)
+            screen_h = self.cfg["screen"]["game_region"]["height"]
+            hx = screen_w // 2 - int(0.016 * screen_w)
+            target_bbox = (hx, 0, hx + int(0.031 * screen_w), int(0.074 * screen_h))
         elif target_type == "enemy_minion":
             target_idx = decision.get("target_index")
             if target_idx is not None and target_idx < len(game_state.opponent_minions):
@@ -197,6 +284,9 @@ class GameController:
             time.sleep(0.8)
 
             current_state = self.recognizer.recognize()
+            if current_state.is_game_over or current_state.is_post_game:
+                self._handle_post_game(current_state)
+                return
             if not current_state.is_our_turn:
                 self.logger.info("攻击后回合结束")
                 return

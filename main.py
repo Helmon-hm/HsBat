@@ -13,7 +13,6 @@ import sys
 
 import yaml
 
-from src.debug_ui import DebugUI
 from src.game_controller import GameController
 from src.logger import HsBatLogger
 from src.paths import get_project_root, get_resource_path
@@ -79,16 +78,11 @@ def run_cli(config: dict):
             logger.warning("大模型已启用但未配置 API Key，回退到规则引擎")
             config["llm"]["enabled"] = False
 
-    debug_ui = DebugUI(config)
-    controller = GameController(config, debug_ui=debug_ui)
-
-    if config["debug"]["show_debug_window"]:
-        debug_ui.start()
+    controller = GameController(config)
 
     def signal_handler(sig, frame):
         logger.info("收到中断信号，正在停止...")
         controller.stop()
-        debug_ui.stop()
         sys.exit(0)
 
     signal.signal(signal.SIGINT, signal_handler)
@@ -97,7 +91,6 @@ def run_cli(config: dict):
     try:
         controller.run()
     finally:
-        debug_ui.stop()
         logger.info("HsBat 已退出")
 
 

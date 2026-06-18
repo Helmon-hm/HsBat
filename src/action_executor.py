@@ -115,8 +115,10 @@ class ActionExecutor:
             for px, py in path:
                 pyautogui.moveTo(px, py, duration=step_duration)
         else:
-            play_y = cy - random.randint(100, 200)
-            play_x = cx + random.randint(-30, 30)
+            screen_h = self.screen_cfg["game_region"]["height"]
+            screen_w = self.screen_cfg["game_region"]["width"]
+            play_y = cy - random.randint(int(0.093 * screen_h), int(0.185 * screen_h))
+            play_x = cx + random.randint(-int(0.016 * screen_w), int(0.016 * screen_w))
             path = self._bezier_curve((cx, cy), (play_x, play_y))
             duration = self._random_delay("drag_duration")
             step_duration = duration / len(path)
@@ -135,14 +137,22 @@ class ActionExecutor:
             self.click_bbox(target_bbox)
         else:
             screen_w = self.screen_cfg["game_region"]["width"]
-            self.click(screen_w // 2, 50)
+            screen_h = self.screen_cfg["game_region"]["height"]
+            self.click(screen_w // 2, int(0.046 * screen_h))
 
     def end_turn(self, button_bbox: Optional[Tuple[int, int, int, int]] = None):
         screen_cfg = self.screen_cfg["game_region"]
         if button_bbox:
             self.click_bbox(button_bbox)
         else:
-            self.click(screen_cfg["width"] - 100, screen_cfg["height"] - 100)
+            self.click(
+                int(screen_cfg["width"] * (1.0 - 0.052)),
+                int(screen_cfg["height"] * (1.0 - 0.093)),
+            )
+
+    def click_screen_region(self, x: int, y: int):
+        self.click(x, y)
+        time.sleep(self._random_delay("click_delay"))
 
     def wait_for_turn(self, seconds: float = 45.0):
         self.logger.info(f"等待敌方回合结束，最长等待{seconds}秒")
