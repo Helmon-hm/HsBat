@@ -1,6 +1,6 @@
 import random
 import time
-from typing import List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple
 
 import numpy as np
 import pyautogui
@@ -9,12 +9,16 @@ from src.logger import HsBatLogger
 
 
 class ActionExecutor:
-    def __init__(self, config: dict):
+    def __init__(self, config: dict, is_running_callback: Callable[[], bool] = None):
         self.cfg = config["action"]
         self.screen_cfg = config["screen"]
         self.logger = HsBatLogger().get_logger("ActionExecutor")
+        self._is_running = is_running_callback or (lambda: True)
         pyautogui.FAILSAFE = True
         pyautogui.PAUSE = 0.05
+
+    def _alive(self) -> bool:
+        return self._is_running()
 
     def _random_delay(self, key: str) -> float:
         limits = self.cfg[key]
@@ -64,26 +68,40 @@ class ActionExecutor:
         )
 
     def move_mouse(self, x: int, y: int):
+        if not self._alive():
+            return
         sx, sy = self._apply_offset(x, y)
         start_x, start_y = pyautogui.position()
         smooth = self.cfg.get("bezier_points", 20)
         path = self._bezier_curve((start_x, start_y), (sx, sy), smooth)
         for px, py in path:
+            if not self._alive():
+                return
             pyautogui.moveTo(px, py, duration=0.01)
             time.sleep(self._random_delay("mouse_move_delay") / len(path))
+        if not self._alive():
+            return
         pyautogui.moveTo(sx, sy, duration=0.01)
 
     def click(self, x: int, y: int):
+        if not self._alive():
+            return
         self.move_mouse(x, y)
+        if not self._alive():
+            return
         time.sleep(self._random_delay("rest_delay"))
         pyautogui.click()
         time.sleep(self._random_delay("click_delay"))
 
     def click_bbox(self, bbox: Tuple[int, int, int, int]):
+        if not self._alive():
+            return
         cx, cy = self._get_center(bbox)
         self.click(cx, cy)
 
     def drag(self, start: Tuple[int, int], end: Tuple[int, int]):
+        if not self._alive():
+            return
         sx, sy = self._apply_offset(*start)
         ex, ey = self._apply_offset(*end)
         pyautogui.moveTo(sx, sy, duration=0.05)
@@ -94,17 +112,23 @@ class ActionExecutor:
         duration = self._random_delay("drag_duration")
         step_duration = duration / len(path)
         for px, py in path:
+            if not self._alive():
+                pyautogui.mouseUp()
+                return
             pyautogui.moveTo(px, py, duration=step_duration)
         pyautogui.mouseUp()
         time.sleep(self._random_delay("click_delay"))
 
-    def play_card(self, card_bbox: Tuple[int, int, int, int], target_bbox: Optional[Tuple[int, int, int, int]] = None):
+    def play_card(self, card_bbox: Tuple[int, int, int, int],
+                  target_bbox: Optional[Tuple[int, int, int, int]] = None):
+        if not self._alive():
+            return
         card_center = self._get_center(card_bbox)
         cx, cy = self._apply_offset(*card_center)
         pyautogui.moveTo(cx, cy, duration=0.05)
         time.sleep(self._random_delay("rest_delay"))
         pyautogui.mouseDown()
-        time.sleep(0.05)
+        time.sleep(0.08)
 
         if target_bbox:
             target_center = self._get_center(target_bbox)
@@ -113,6 +137,9 @@ class ActionExecutor:
             duration = self._random_delay("drag_duration")
             step_duration = duration / len(path)
             for px, py in path:
+                if not self._alive():
+                    pyautogui.mouseUp()
+                    return
                 pyautogui.moveTo(px, py, duration=step_duration)
         else:
             screen_h = self.screen_cfg["game_region"]["height"]
@@ -123,15 +150,25 @@ class ActionExecutor:
             duration = self._random_delay("drag_duration")
             step_duration = duration / len(path)
             for px, py in path:
+                if not self._alive():
+                    pyautogui.mouseUp()
+                    return
                 pyautogui.moveTo(px, py, duration=step_duration)
 
+        if not self._alive():
+            pyautogui.mouseUp()
+            return
         pyautogui.mouseUp()
         time.sleep(self._random_delay("click_delay"))
 
     def attack_with_minion(
         self, attacker_bbox: Tuple[int, int, int, int], target_bbox: Optional[Tuple[int, int, int, int]] = None
     ):
+        if not self._alive():
+            return
         self.click_bbox(attacker_bbox)
+        if not self._alive():
+            return
         time.sleep(self._random_delay("rest_delay"))
         if target_bbox:
             self.click_bbox(target_bbox)
@@ -141,6 +178,8 @@ class ActionExecutor:
             self.click(screen_w // 2, int(0.046 * screen_h))
 
     def end_turn(self, button_bbox: Optional[Tuple[int, int, int, int]] = None):
+        if not self._alive():
+            return
         screen_cfg = self.screen_cfg["game_region"]
         if button_bbox:
             self.click_bbox(button_bbox)
@@ -151,9 +190,7 @@ class ActionExecutor:
             )
 
     def click_screen_region(self, x: int, y: int):
+        if not self._alive():
+            return
         self.click(x, y)
         time.sleep(self._random_delay("click_delay"))
-
-    def wait_for_turn(self, seconds: float = 45.0):
-        self.logger.info(f"等待敌方回合结束，最长等待{seconds}秒")
-        time.sleep(random.uniform(1.0, 2.0))

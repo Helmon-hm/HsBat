@@ -5,18 +5,49 @@ screen:
     width: 0
     height: 0
   scale: 1.0
+
 templates:
   directory: templates
-  match_threshold: 0.75
+  match_threshold: 0.70
   end_turn_button: end_turn.png
+  play_button: play_button.png
+
 ocr:
   tesseract_path: C:\Program Files\Tesseract-OCR\tesseract.exe
   lang: eng+chi_sim
+  upscale_factor: 5
   card_cost_offset:
     dx: 0
     dy: -30
     width: 40
     height: 30
+
+recognition:
+  frame_cache_size: 5
+  min_consistent_frames: 3
+  canny_lower: 30
+  canny_upper: 100
+  minion_canny_lower: 50
+  minion_canny_upper: 150
+  binary_threshold_bright: 200
+  binary_threshold_mid: 160
+  binary_threshold_dark: 128
+  min_contour_area_ratio: 0.000014
+  card_min_width_ratio: 0.026
+  card_min_height_ratio: 0.093
+  card_name_offset_x_ratio: 0.01
+  card_name_width_ratio: 0.021
+  card_name_height_ratio: 0.023
+  card_arc_center_y_ratio: 0.42
+  card_arc_radius_ratio: 0.45
+  card_arc_tolerance: 0.03
+  board_gap_merge_ratio: 0.01
+  card_count_method: sobel
+  sobel_sigma: 8
+  sobel_top_ratio: 0.35
+  sobel_prominence: 0.10
+  template_rotate_angles: [-35, -30, -25, -20, -15, -10, -5, 0, 5, 10, 15, 20, 25, 30, 35]
+
 llm:
   enabled: true
   provider: openai_compatible
@@ -34,6 +65,7 @@ llm:
     - target_index: 攻击或法术目标索引，0-based\n- play_card: 出牌，需要指定card_index和可能的target_index\n\
     - attack: 用随从攻击，由主控制器决定攻击者，此动作表示攻击指令\n- use_hero_power: 使用英雄技能\n- 如果法力值不足或无法做任何事，输出\
     \ end_turn\n"
+
 action:
   mouse_move_delay:
     min: 0.1
@@ -51,35 +83,130 @@ action:
     min: 30
     max: 120
   bezier_points: 20
+
 game:
   # --- 区域识别（相对百分比 0.0~1.0，适配任意分辨率）---
-  # 法力水晶位于画面右下角，英雄头像旁边
-  mana_region: [0.81, 0.84, 0.08, 0.03]
-  health_region: [0.453, 0.894, 0.094, 0.037]
-  enemy_health_region: [0.453, 0.069, 0.094, 0.037]
-  hand_card_region: [0.083, 0.852, 0.833, 0.148]
-  turn_indicator_region: [0.417, 0.444, 0.167, 0.111]
-  # --- 颜色阈值 (不受分辨率影响) ---
-  mana_color_lower: [200, 180, 50]
-  mana_color_upper: [255, 230, 130]
+  mana_region: [0.636, 0.9, 0.40, 0.05]
+  mana_text_region: [0.636, 0.89, 0.05, 0.07]
+  health_region: [0.524, 0.80, 0.027, 0.05]
+  enemy_health_region: [0.524, 0.215, 0.027, 0.05]
+  hand_card_region: [0.3, 0.852, 0.34, 0.148]
+  our_board_region: [0.23, 0.465, 0.53, 0.15]
+  enemy_board_region: [0.23, 0.3, 0.53, 0.15]
+  turn_indicator_region: [0.77, 0.416, 0.086, 0.09]
+  end_turn_button_region: [0.77, 0.416, 0.086, 0.09]
+  # --- 颜色阈值 (BGR, 不受分辨率影响) ---
   attackable_green_lower: [40, 80, 80]
   attackable_green_upper: [90, 255, 255]
+  card_border_color_lower: [0, 0, 30]
+  card_border_color_upper: [255, 80, 255]
+  minion_border_color_lower: [0, 20, 80]
+  minion_border_color_upper: [30, 255, 255]
   # --- 像素阈值 (以实际图片尺寸为基准自适应) ---
-  attackable_green_border_width: 8
-  attackable_green_min_ratio: 0.08
+  attackable_green_border_width: 6
+  attackable_green_min_ratio: 0.1
   minion_min_size: [0.016, 0.037]
   minion_max_size: [0.104, 0.278]
-  minion_ocr_size: [0.016, 0.019]
+  minion_ocr_size: [0.03, 0.03]
   # --- 对局结束/重排队 ---
   auto_requeue: true
   post_game_click_region: [0.21, 0.60]
-  play_button_region: [0.36, 0.56, 0.27, 0.06]
+  play_button_region: [0.69, 0.729, 0.1, 0.18]
+  # --- 手牌/随从固定位置（日志可用时直接用配置，跳过CV）---
+  hand_card_positions:
+    1:
+      0: [0.47, 0.89, 0.06, 0.10]
+    2:
+      0: [0.40, 0.89, 0.06, 0.10]
+      1: [0.54, 0.89, 0.06, 0.10]
+    3:
+      0: [0.39, 0.89, 0.06, 0.10]
+      1: [0.47, 0.89, 0.06, 0.10]
+      2: [0.54, 0.89, 0.06, 0.10]
+    4:
+      0: [0.367, 0.89, 0.05, 0.10]
+      1: [0.44, 0.89, 0.05, 0.10]
+      2: [0.515, 0.89, 0.05, 0.10]
+      3: [0.585, 0.89, 0.05, 0.10]
+    5:
+      0: [0.36, 0.89, 0.04, 0.10]
+      1: [0.41, 0.89, 0.04, 0.10]
+      2: [0.476, 0.89, 0.04, 0.10]
+      3: [0.535, 0.89, 0.04, 0.10]
+      4: [0.6, 0.89, 0.04, 0.10]
+    6:
+      0: [0.26, 0.89, 0.04, 0.09]
+      1: [0.35, 0.89, 0.04, 0.09]
+      2: [0.44, 0.89, 0.04, 0.09]
+      3: [0.53, 0.89, 0.04, 0.09]
+      4: [0.61, 0.89, 0.04, 0.09]
+      5: [0.70, 0.89, 0.04, 0.09]
+    7:
+      0: [0.25, 0.88, 0.03, 0.09]
+      1: [0.33, 0.88, 0.03, 0.09]
+      2: [0.42, 0.88, 0.03, 0.09]
+      3: [0.50, 0.88, 0.03, 0.09]
+      4: [0.58, 0.88, 0.03, 0.09]
+      5: [0.66, 0.88, 0.03, 0.09]
+      6: [0.73, 0.88, 0.03, 0.09]
+    8:
+      0: [0.23, 0.88, 0.03, 0.08]
+      1: [0.32, 0.88, 0.03, 0.08]
+      2: [0.40, 0.88, 0.03, 0.08]
+      3: [0.48, 0.88, 0.03, 0.08]
+      4: [0.55, 0.88, 0.03, 0.08]
+      5: [0.63, 0.88, 0.03, 0.08]
+      6: [0.70, 0.88, 0.03, 0.08]
+      7: [0.76, 0.88, 0.03, 0.08]
+    9:
+      0: [0.22, 0.88, 0.03, 0.08]
+      1: [0.30, 0.88, 0.03, 0.08]
+      2: [0.38, 0.88, 0.03, 0.08]
+      3: [0.46, 0.88, 0.03, 0.08]
+      4: [0.53, 0.88, 0.03, 0.08]
+      5: [0.60, 0.88, 0.03, 0.08]
+      6: [0.67, 0.88, 0.03, 0.08]
+      7: [0.74, 0.88, 0.03, 0.08]
+      8: [0.80, 0.88, 0.03, 0.08]
+    10:
+      0: [0.21, 0.87, 0.02, 0.07]
+      1: [0.28, 0.87, 0.02, 0.07]
+      2: [0.36, 0.87, 0.02, 0.07]
+      3: [0.43, 0.87, 0.02, 0.07]
+      4: [0.50, 0.87, 0.02, 0.07]
+      5: [0.57, 0.87, 0.02, 0.07]
+      6: [0.64, 0.87, 0.02, 0.07]
+      7: [0.71, 0.87, 0.02, 0.07]
+      8: [0.78, 0.87, 0.02, 0.07]
+      9: [0.84, 0.87, 0.02, 0.07]
+  our_board_positions:
+    0: [0.5, 0.55, 0.08, 0.12]
+    1: [0.464, 0.55, 0.08, 0.12]
+    2: [0.41, 0.55, 0.08, 0.12]
+    3: [0.49, 0.55, 0.08, 0.12]
+    4: [0.57, 0.55, 0.08, 0.12]
+    5: [0.65, 0.55, 0.08, 0.12]
+    6: [0.73, 0.55, 0.08, 0.12]
+  enemy_board_positions:
+    0: [0.5, 0.375, 0.08, 0.12]
+    1: [0.464, 0.375, 0.08, 0.12]
+    2: [0.41, 0.375, 0.08, 0.12]
+    3: [0.49, 0.375, 0.08, 0.12]
+    4: [0.57, 0.375, 0.08, 0.12]
+    5: [0.65, 0.375, 0.08, 0.12]
+    6: [0.73, 0.375, 0.08, 0.12]
+
 rule_engine:
   play_card_strategy: low_cost_first
   attack_strategy: face_only
   defend_when_lethal: true
   lethal_margin: 2
   use_hero_power: true
+
+log_tracking:
+  enabled: true
+  power_log_path: ""
+
 debug:
   enabled: true
   save_screenshots: true

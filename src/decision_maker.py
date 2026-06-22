@@ -46,17 +46,26 @@ class DecisionMaker:
         # 1) 出牌
         playable = [c for c in game_state.hand_cards if c.is_playable]
         if playable:
+            # Check if END_TURN is the only valid option (from log)
+            if game_state.action_options:
+                end_turn_opt = game_state.action_options[0]
+                if end_turn_opt.is_playable:
+                    self.logger.info("规则决策: 无可出牌, 结束回合")
+                    return {
+                        "action": "end_turn", "card_index": None, "target_index": None,
+                        "target_type": None, "reason": "规则引擎: 无可操作(日志判定)",
+                    }
             if play_strategy == "high_cost_first":
                 card = max(playable, key=lambda c: c.cost)
             else:
                 card = min(playable, key=lambda c: c.cost)
-            self.logger.info(f"规则决策: 出牌 [{card.name}](费用{card.cost}, 策略={play_strategy})")
+            self.logger.info(f"规则决策: 出牌 卡{playable.index(card)} ({card.name or '卡牌'} 费用{card.cost}, 类型{card.card_type}, 策略={play_strategy})")
             return {
                 "action": "play_card",
                 "card_index": game_state.hand_cards.index(card),
                 "target_index": None,
                 "target_type": None,
-                "reason": f"规则引擎: 出[{card.name}](费{card.cost})",
+                "reason": f"规则引擎: 出牌({card.name or '卡牌'} 费{card.cost})",
             }
 
         # 2) 随从攻击
@@ -327,23 +336,35 @@ class DecisionMaker:
     def _state_to_text(self, game_state: GameState) -> str:
         lines = ["## 当前游戏状态"]
         lines.append(f"回合: {'我方' if game_state.is_our_turn else '敌方'}")
-        lines.append(f"我方英雄血量: {game_state.our_health}")
-        lines.append(f"敌方英雄血量: {game_state.opponent_health}")
+        lines.append(f"我方英雄血量: {game_state.our_health}" + (f" 护甲: {game_state.our_armor}" if game_state.our_armor else ""))
+        lines.append(f"敌方英雄血量: {game_state.opponent_health}" + (f" 护甲: {game_state.opponent_armor}" if game_state.opponent_armor else ""))
         lines.append(f"法力水晶: {game_state.our_mana}/{game_state.total_mana}")
 
         lines.append(f"\n手牌 ({len(game_state.hand_cards)}张):")
         for i, card in enumerate(game_state.hand_cards):
             playable = " (可出)" if card.is_playable else ""
-            lines.append(f"  [{i}] 费用:{card.cost} {card.name}{playable}")
+            name_str = f" {card.name}" if card.name else ""
+            lines.append(f"  [{i}] 费用:{card.cost} 类型:{card.card_type}{name_str}{playable}")
 
         lines.append(f"\n我方随从 ({len(game_state.our_minions)}个):")
         for i, m in enumerate(game_state.our_minions):
             attackable = " (可攻击)" if m.can_attack else ""
-            lines.append(f"  [{i}] {m.attack}/{m.health}{attackable}")
+            name_str = f" {m.name}" if m.name else ""
+            mechanics = []
+            if m.has_taunt: mechanics.append("嘲讽")
+            if m.has_divine_shield: mechanics.append("圣盾")
+            if m.has_stealth: mechanics.append("潜行")
+            mech_str = f" [{','.join(mechanics)}]" if mechanics else ""
+            lines.append(f"  [{i}] {m.attack}/{m.health}{name_str}{attackable}{mech_str}")
 
         lines.append(f"\n敌方随从 ({len(game_state.opponent_minions)}个):")
         for i, m in enumerate(game_state.opponent_minions):
-            lines.append(f"  [{i}] {m.attack}/{m.health}")
+            mechanics = []
+            if m.has_taunt: mechanics.append("嘲讽")
+            if m.has_divine_shield: mechanics.append("圣盾")
+            if m.has_stealth: mechanics.append("潜行")
+            mech_str = f" [{','.join(mechanics)}]" if mechanics else ""
+            lines.append(f"  [{i}] {m.attack}/{m.health}{mech_str}")
 
         return "\n".join(lines)
 
