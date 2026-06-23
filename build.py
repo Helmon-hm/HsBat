@@ -34,7 +34,6 @@ def build():
         "--hidden-import=src.logger",
         "--hidden-import=src.gui_app",
         "--hidden-import=src.paths",
-        "--hidden-import=pytesseract",
         "--hidden-import=pyautogui",
         "--hidden-import=pystray",
         "--hidden-import=PIL._tkinter_finder",

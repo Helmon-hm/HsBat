@@ -13,6 +13,12 @@ from src.logger import HsBatLogger
 from src.paths import get_project_root, get_resource_path
 
 try:
+    import keyboard
+    HAS_KEYBOARD = True
+except ImportError:
+    HAS_KEYBOARD = False
+
+try:
     import pystray
     from PIL import Image, ImageDraw
     HAS_TRAY = True
@@ -124,6 +130,13 @@ class HsBatGUI:
         self.status_label = ttk.Label(ctrl_frame, text="状态: 未启动",
                                        font=("", 10, "bold"))
         self.status_label.pack(side=tk.LEFT, padx=(20, 0))
+
+        hotkey_label = ttk.Label(
+            ctrl_frame,
+            text="  全局热键:  F6=启停  F7=暂停  F8=急停",
+            foreground="#888888", font=("", 9),
+        )
+        hotkey_label.pack(side=tk.LEFT, padx=(10, 0))
 
         # ---------- 决策模式 (一目了然) ----------
         mode_frame = ttk.LabelFrame(tab, text="决策模式 — 选一种", padding=10)
@@ -289,17 +302,6 @@ class HsBatGUI:
         ttk.Spinbox(game_frame, from_=600, to=2160, textvariable=self.screen_h_var, width=10)\
             .grid(row=1, column=1, sticky="w", pady=2)
 
-        ttk.Label(game_frame, text="Tesseract 路径:")\
-            .grid(row=2, column=0, sticky="w", padx=(0, 5), pady=2)
-        tess_frame = ttk.Frame(game_frame)
-        tess_frame.grid(row=2, column=1, sticky="ew", pady=2)
-        tess_frame.columnconfigure(0, weight=1)
-        self.tesseract_path_var = tk.StringVar()
-        ttk.Entry(tess_frame, textvariable=self.tesseract_path_var)\
-            .grid(row=0, column=0, sticky="ew")
-        ttk.Button(tess_frame, text="浏览", width=6, command=self._browse_tesseract)\
-            .grid(row=0, column=1, padx=(5, 0))
-
         row += 1
         # ---------- 规则引擎策略 ----------
         rule_frame = ttk.LabelFrame(tab, text="规则引擎策略（快速模式）", padding=10)
@@ -384,14 +386,6 @@ class HsBatGUI:
         self.api_key_entry.config(show="" if self._key_visible else "*")
         self._show_key_btn.config(text="隐藏" if self._key_visible else "显示")
 
-    def _browse_tesseract(self):
-        path = filedialog.askopenfilename(
-            title="选择 tesseract.exe",
-            filetypes=[("可执行文件", "*.exe")],
-        )
-        if path:
-            self.tesseract_path_var.set(path)
-
     def _load_config_to_ui(self):
         cfg = self.config
         llm = cfg.get("llm", {})
@@ -409,9 +403,6 @@ class HsBatGUI:
         sw, sh = self._get_screen_size()
         self.screen_w_var.set(screen.get("width", sw) or sw)
         self.screen_h_var.set(screen.get("height", sh) or sh)
-
-        ocr = cfg.get("ocr", {})
-        self.tesseract_path_var.set(ocr.get("tesseract_path", ""))
 
         rule = cfg.get("rule_engine", {})
         self.rule_play_var.set(rule.get("play_card_strategy", "high_cost_first"))
@@ -431,7 +422,6 @@ class HsBatGUI:
         self.config["llm"]["temperature"] = round(self.temperature_var.get(), 1)
         self.config.setdefault("screen", {}).setdefault("game_region", {})["width"] = self.screen_w_var.get()
         self.config["screen"]["game_region"]["height"] = self.screen_h_var.get()
-        self.config.setdefault("ocr", {})["tesseract_path"] = self.tesseract_path_var.get().strip()
         self.config.setdefault("rule_engine", {})["play_card_strategy"] = self.rule_play_var.get()
         self.config["rule_engine"]["attack_strategy"] = self.rule_attack_var.get()
         self.config["rule_engine"]["defend_when_lethal"] = self.rule_defend_var.get()
@@ -457,7 +447,6 @@ class HsBatGUI:
             sw, sh = self._get_screen_size()
             self.screen_w_var.set(sw)
             self.screen_h_var.set(sh)
-            self.tesseract_path_var.set("C:\\Program Files\\Tesseract-OCR\\tesseract.exe")
             self.temperature_label.config(text="0.3")
             self.rule_play_var.set("high_cost_first")
             self.rule_attack_var.set("smart")
@@ -515,6 +504,7 @@ class HsBatGUI:
     def _stop_bot(self):
         if self.controller:
             self.controller.stop()
+        self.bot_running = False
         self.status_label.config(text="状态: 正在停止...")
 
     def _on_bot_stopped(self):
@@ -598,8 +588,60 @@ class HsBatGUI:
             self._tray_icon.stop()
         self.root.after(0, self.root.destroy)
 
+    # ---------- 全局热键 ----------
+    def _register_hotkeys(self):
+        if not HAS_KEYBOARD:
+            self._append_log("WARNING", "Main", "keyboard 库未安装，全局热键不可用")
+            return
+        try:
+            keyboard.add_hotkey("F6", self._hotkey_toggle_bot)
+            keyboard.add_hotkey("F7", self._hotkey_toggle_pause)
+            keyboard.add_hotkey("F8", self._hotkey_emergency_stop)
+            self._append_log("INFO", "Main", "全局热键已注册: F6=启停  F7=暂停  F8=急停")
+        except Exception as e:
+            self._append_log("WARNING", "Main", f"全局热键注册失败（可能需要管理员权限）: {e}")
+
+    def _unregister_hotkeys(self):
+        if not HAS_KEYBOARD:
+            return
+        try:
+            keyboard.unhook_all_hotkeys()
+        except Exception:
+            pass
+
+    def _hotkey_toggle_bot(self):
+        self.root.after(0, self._toggle_bot)
+
+    def _toggle_bot(self):
+        if self.bot_running:
+            self._stop_bot()
+        else:
+            self._start_bot()
+
+    def _hotkey_toggle_pause(self):
+        if self.controller:
+            self.controller.toggle_pause()
+            status = "暂停" if self.controller.paused else "继续"
+            self.root.after(0, lambda: self._append_log("INFO", "Main", f"热键: {status}执行"))
+            self.root.after(0, lambda: self.status_label.config(
+                text=f"状态: {'已暂停' if self.controller.paused else '运行中...'}"))
+
+    def _hotkey_emergency_stop(self):
+        self.root.after(0, self._emergency_stop)
+
+    def _emergency_stop(self):
+        self._append_log("WARNING", "Main", "紧急停止 (F8)")
+        if self.controller:
+            self.controller.stop()
+            self.controller.paused = False
+        self.bot_running = False
+        self.start_btn.config(state=tk.NORMAL)
+        self.stop_btn.config(state=tk.DISABLED)
+        self.status_label.config(text="状态: 已急停")
+
     # ---------- 生命周期 ----------
     def run(self):
+        self._register_hotkeys()
         if HAS_TRAY:
             self._create_tray_icon()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -617,6 +659,7 @@ class HsBatGUI:
                 return
             self._stop_bot()
             time.sleep(0.5)
+        self._unregister_hotkeys()
         try:
             if self._tray_icon:
                 self._tray_icon.stop()

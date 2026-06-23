@@ -98,18 +98,37 @@ class DecisionMaker:
         defend_lethal = rule_cfg.get("defend_when_lethal", True)
         lethal_margin = rule_cfg.get("lethal_margin", 2)
         opponent_minions = game_state.opponent_minions
+        taunt_minions = [m for m in opponent_minions if m.has_taunt]
+        face_attackers = [m for m in attackable if m.can_attack_hero]
 
         # --- 无敌方随从：直接打脸 ---
         if not opponent_minions:
-            self.logger.info("规则决策: 随从攻击敌方英雄")
-            return {
-                "action": "attack", "card_index": None,
-                "target_index": None, "target_type": "enemy_hero",
-                "reason": "规则引擎: 攻击敌方英雄",
-            }
+            if face_attackers:
+                self.logger.info("规则决策: 随从攻击敌方英雄")
+                return {
+                    "action": "attack", "card_index": None,
+                    "target_index": None, "target_type": "enemy_hero",
+                    "reason": "规则引擎: 攻击敌方英雄",
+                }
+            else:
+                self.logger.info("规则决策: 无可打脸随从")
+                return None
 
         # --- face_only 策略 ---
         if attack_strategy == "face_only":
+            if taunt_minions or not face_attackers:
+                if taunt_minions:
+                    self.logger.info("规则决策: 存在嘲讽随从, 优先解嘲讽")
+                    best_target = self._pick_best_trade(attackable, taunt_minions,
+                                                         prefer_high_attack=True)
+                    return {
+                        "action": "attack", "card_index": None,
+                        "target_index": best_target, "target_type": "enemy_minion",
+                        "reason": "规则引擎: face_only 打嘲讽",
+                    }
+                else:
+                    self.logger.info("规则决策: 无可打脸随从 (face_only)")
+                    return None
             self.logger.info("规则决策: 攻击敌方英雄 (face_only)")
             return {
                 "action": "attack", "card_index": None,
@@ -155,6 +174,15 @@ class DecisionMaker:
             }
 
         if has_lethal_on_enemy:
+            if taunt_minions:
+                self.logger.info(f"规则决策: 斩杀但有嘲讽, 先解嘲讽")
+                best_target = self._pick_best_trade(attackable, taunt_minions,
+                                                     prefer_high_attack=True)
+                return {
+                    "action": "attack", "card_index": None,
+                    "target_index": best_target, "target_type": "enemy_minion",
+                    "reason": "规则引擎: 斩杀前解嘲讽",
+                }
             self.logger.info(
                 f"规则决策: 斩杀! 场攻={our_board_damage} >= 敌血={enemy_health}"
             )
@@ -165,6 +193,16 @@ class DecisionMaker:
             }
 
         # 常规：聪明地选择目标
+        # 如果有嘲讽随从，必须优先解
+        if taunt_minions:
+            best_target = self._pick_best_trade(attackable, taunt_minions)
+            self.logger.info(f"规则决策: 优先解嘲讽")
+            return {
+                "action": "attack", "card_index": None,
+                "target_index": best_target, "target_type": "enemy_minion",
+                "reason": "规则引擎: 解嘲讽随从",
+            }
+
         # 如果有高威胁随从（高攻击力），优先解
         high_threat = [m for m in opponent_minions if m.attack >= 4]
         if high_threat:
@@ -224,16 +262,27 @@ class DecisionMaker:
         defend_lethal = rule_cfg.get("defend_when_lethal", True)
         lethal_margin = rule_cfg.get("lethal_margin", 2)
 
-        attackable = [m for m in game_state.our_minions if m.can_attack]
-        if not attackable:
+        # Map attackable indices to original our_minions indices
+        attackable_indices = [i for i, m in enumerate(game_state.our_minions) if m.can_attack]
+        face_attackers = [i for i, m in enumerate(game_state.our_minions) if m.can_attack_hero]
+        if not attackable_indices:
             return orders
+        attackable = [game_state.our_minions[i] for i in attackable_indices]
 
         opponent_minions = list(game_state.opponent_minions)
+        taunt_minions = [m for m in opponent_minions if m.has_taunt]
 
         # 先打脸策略
         if attack_strategy == "face_only" or not opponent_minions:
-            for i, _ in enumerate(attackable):
-                orders.append({"attacker_index": i, "target_index": None, "target_type": "enemy_hero"})
+            if taunt_minions:
+                remaining = list(attackable_indices)
+                for ai, ti in zip(remaining, range(len(taunt_minions))):
+                    orders.append({"attacker_index": ai,
+                                   "target_index": opponent_minions.index(taunt_minions[ti]),
+                                   "target_type": "enemy_minion"})
+            if not taunt_minions:
+                for ai in face_attackers:
+                    orders.append({"attacker_index": ai, "target_index": None, "target_type": "enemy_hero"})
             return orders
 
         # 计算危险度
@@ -242,14 +291,14 @@ class DecisionMaker:
         our_board_damage = sum(m.attack for m in attackable)
         has_lethal = our_board_damage >= game_state.opponent_health
 
-        # 斩杀 → 全打脸
-        if has_lethal and not in_danger:
-            for i, _ in enumerate(attackable):
-                orders.append({"attacker_index": i, "target_index": None, "target_type": "enemy_hero"})
+        # 斩杀 → 全打脸 (unless taunt blocks)
+        if has_lethal and not in_danger and not taunt_minions:
+            for ai in face_attackers:
+                orders.append({"attacker_index": ai, "target_index": None, "target_type": "enemy_hero"})
             return orders
 
         # 解场 + 打脸混合
-        remaining_attackers = list(range(len(attackable)))
+        remaining_attackers = list(attackable_indices)
         remaining_defenders = list(range(len(opponent_minions)))
 
         # 每轮找一个最优交换
@@ -258,10 +307,9 @@ class DecisionMaker:
             best_efficiency = float("inf")
 
             for ai in remaining_attackers:
-                a = attackable[ai]
+                a = game_state.our_minions[ai]
                 for di in remaining_defenders:
                     d = opponent_minions[di]
-                    # 效率 = 对攻击者的伤害 / 消灭的敌方攻击力
                     damage_to_attacker = max(0, d.attack - a.health) if d.attack > 0 else 0
                     if d.health <= a.attack:
                         efficiency = damage_to_attacker / max(d.attack, 1)
@@ -277,9 +325,38 @@ class DecisionMaker:
             remaining_attackers.remove(ai)
             remaining_defenders.remove(di)
 
-        # 剩余攻击者打脸
+        # Clear remaining taunts before going face
+        while remaining_attackers and remaining_defenders:
+            taunt_defenders = [di for di in remaining_defenders if opponent_minions[di].has_taunt]
+            if not taunt_defenders:
+                break
+            di = min(taunt_defenders, key=lambda i: opponent_minions[i].health)  # Attack weakest taunt first
+            # Find best attacker for this taunt
+            d = opponent_minions[di]
+            best_ai = None
+            best_dmg = float("inf")
+            for ai in remaining_attackers:
+                a = game_state.our_minions[ai]
+                if a.attack >= d.health:
+                    damage_to_us = max(0, d.attack - a.health)
+                    if damage_to_us < best_dmg:
+                        best_dmg = damage_to_us
+                        best_ai = ai
+            if best_ai is not None:
+                orders.append({"attacker_index": best_ai, "target_index": di,
+                               "target_type": "enemy_minion"})
+                remaining_attackers.remove(best_ai)
+                remaining_defenders.remove(di)
+            else:
+                best_ai = min(remaining_attackers, key=lambda ai: game_state.our_minions[ai].attack)
+                orders.append({"attacker_index": best_ai, "target_index": di,
+                               "target_type": "enemy_minion"})
+                remaining_attackers.remove(best_ai)
+                remaining_defenders.remove(di)
+
         for ai in remaining_attackers:
-            orders.append({"attacker_index": ai, "target_index": None, "target_type": "enemy_hero"})
+            if ai in face_attackers:
+                orders.append({"attacker_index": ai, "target_index": None, "target_type": "enemy_hero"})
 
         return orders
 

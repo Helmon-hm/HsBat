@@ -30,6 +30,7 @@ class MinionInfo:
     attack: int
     position: Tuple[int, int, int, int]
     can_attack: bool = False
+    can_attack_hero: bool = False
     name: str = ""
     card_id: str = ""
     has_taunt: bool = False
@@ -80,12 +81,8 @@ class StateRecognizer:
         self.logger = HsBatLogger().get_logger("StateRecognizer")
         self._auto_detect_screen_size()
         self.scale = config["screen"]["scale"]
-        self.ocr_lang = config["ocr"].get("lang", "eng")
-        self.ocr_upscale = config["ocr"].get("upscale_factor", 3)
-        self.card_cost_offset = config["ocr"]["card_cost_offset"]
 
         self.recog_cfg = config.get("recognition", {})
-        self.tesseract_available = self._check_tesseract()
         self.paddle_ocr = self._init_paddleocr()
         self._load_templates()
         self._debug_dir = config["debug"].get("screenshot_dir", "screenshots")
@@ -104,13 +101,6 @@ class StateRecognizer:
         self._log_enabled = config.get("log_tracking", {}).get("enabled", True)
         self._last_log_warning = 0.0
 
-        self._digit_color_masks = [
-            ("white", np.array([150, 150, 150], dtype=np.uint8), np.array([255, 255, 255], dtype=np.uint8)),
-            ("red", np.array([0, 0, 140], dtype=np.uint8), np.array([80, 80, 255], dtype=np.uint8)),
-            ("green", np.array([0, 140, 0], dtype=np.uint8), np.array([100, 255, 100], dtype=np.uint8)),
-            ("bright_white", np.array([180, 180, 180], dtype=np.uint8), np.array([255, 255, 255], dtype=np.uint8)),
-        ]
-
     def _auto_detect_screen_size(self):
         region = self.cfg["screen"]["game_region"]
         w = region.get("width", 0)
@@ -120,32 +110,6 @@ class StateRecognizer:
             region["width"] = screen_w
             region["height"] = screen_h
             self.logger.info(f"自动检测屏幕分辨率: {screen_w} x {screen_h}")
-
-    def _check_tesseract(self) -> bool:
-        ocr_cfg = self.cfg["ocr"]
-        tesseract_path = ocr_cfg.get("tesseract_path", "")
-        if tesseract_path and os.path.exists(tesseract_path):
-            try:
-                import pytesseract
-                pytesseract.pytesseract.tesseract_cmd = tesseract_path
-                pytesseract.get_tesseract_version()
-                self.logger.info(f"Tesseract-OCR 已就绪: {tesseract_path}")
-                return True
-            except Exception as e:
-                self.logger.warning(f"指定的 Tesseract 路径无法使用: {tesseract_path} ({e})")
-        try:
-            import pytesseract
-            pytesseract.get_tesseract_version()
-            self.logger.info("Tesseract-OCR 已就绪 (PATH)")
-            return True
-        except Exception:
-            self.logger.warning(
-                "Tesseract-OCR 未安装或不在 PATH 中。"
-                "OCR 功能将不可用，部分识别会使用降级方案。\n"
-                "安装方法: https://github.com/UB-Mannheim/tesseract/wiki\n"
-                "安装后配置 config.yaml 中的 ocr.tesseract_path"
-            )
-            return False
 
     def _init_paddleocr(self):
         try:
@@ -158,18 +122,16 @@ class StateRecognizer:
             return None
 
     def _ocr_number(self, roi: np.ndarray, whitelist: str = "0123456789") -> int:
-        """Unified OCR: PaddleOCR first, Tesseract fallback."""
+        """PaddleOCR-based number recognition."""
         if roi is None or roi.size == 0:
             return 0
 
-        # PaddleOCR
         if self.paddle_ocr is not None:
             try:
                 if len(roi.shape) == 2:
                     ocr_input = cv2.cvtColor(roi, cv2.COLOR_GRAY2BGR)
                 else:
                     ocr_input = roi
-                # Upscale small images for better text detection
                 h, w = ocr_input.shape[:2]
                 if w < 100 or h < 100:
                     scale = max(3, min(6, 100 // min(w, h)))
@@ -198,137 +160,7 @@ class StateRecognizer:
             except Exception:
                 pass
 
-        # Tesseract fallback
-        return self._tesseract_ocr_number(roi)
-
-    def _tesseract_ocr_number(self, roi: np.ndarray) -> int:
-        import pytesseract
-        if not self.tesseract_available or roi is None or roi.size == 0:
-            return 0
-        try:
-            if len(roi.shape) == 2:
-                roi_bgr = cv2.cvtColor(roi, cv2.COLOR_GRAY2BGR)
-            else:
-                roi_bgr = roi
-            if self.ocr_upscale > 1:
-                roi_bgr = cv2.resize(roi_bgr, None, fx=self.ocr_upscale, fy=self.ocr_upscale,
-                                     interpolation=cv2.INTER_CUBIC)
-            gray = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2GRAY)
-            for method in [cv2.THRESH_BINARY + cv2.THRESH_OTSU,
-                           cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU]:
-                _, thresh = cv2.threshold(gray, 0, 255, method)
-                if cv2.countNonZero(thresh) < 8:
-                    continue
-                for psm in [7, 8, 6]:
-                    text = pytesseract.image_to_string(
-                        thresh, config=f"--psm {psm} -c tessedit_char_whitelist=0123456789"
-                    ).strip()
-                    if text and text.isdigit():
-                        return int(text)
-            for label, lower, upper in self._digit_color_masks:
-                mask = cv2.inRange(roi_bgr, lower, upper)
-                if cv2.countNonZero(mask) < 10:
-                    continue
-                text = pytesseract.image_to_string(
-                    mask, config="--psm 7 -c tessedit_char_whitelist=0123456789"
-                ).strip()
-                if text and text.isdigit():
-                    return int(text)
-        except Exception:
-            pass
         return 0
-
-    def _debug_save_roi(self, name: str, roi: np.ndarray):
-        if not self.cfg["debug"].get("save_screenshots", False):
-            return
-        out_dir = os.path.join(self._debug_dir, "ocr_debug")
-        os.makedirs(out_dir, exist_ok=True)
-        path = os.path.join(out_dir, f"{name}.png")
-        try:
-            cv2.imwrite(path, roi)
-        except Exception:
-            pass
-
-    def _preprocess_for_ocr(self, img: np.ndarray, invert: bool = False) -> np.ndarray:
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if len(img.shape) == 3 else img.copy()
-        upscale = self.recog_cfg.get("ocr_upscale", self.cfg["ocr"].get("upscale_factor", 3))
-        if upscale > 1:
-            gray = cv2.resize(gray, None, fx=upscale, fy=upscale, interpolation=cv2.INTER_CUBIC)
-        gray = cv2.GaussianBlur(gray, (3, 3), 0)
-        _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        if invert:
-            thresh = cv2.bitwise_not(thresh)
-        return thresh
-
-    def _safe_ocr(self, img: np.ndarray, config: str = "", lang: Optional[str] = None) -> str:
-        if not self.tesseract_available:
-            return ""
-        try:
-            import pytesseract
-            processed = self._preprocess_for_ocr(img)
-            return pytesseract.image_to_string(processed, config=config, lang=lang or self.ocr_lang)
-        except Exception:
-            return ""
-
-    def _safe_ocr_number(self, roi: np.ndarray) -> int:
-        if not self.tesseract_available:
-            return 0
-        if roi is None or roi.size == 0:
-            return 0
-        try:
-            import pytesseract
-
-            upscale = self.ocr_upscale
-
-            if len(roi.shape) == 2:
-                roi_bgr = cv2.cvtColor(roi, cv2.COLOR_GRAY2BGR)
-            else:
-                roi_bgr = roi
-
-            if upscale > 1:
-                roi_bgr = cv2.resize(roi_bgr, None, fx=upscale, fy=upscale,
-                                     interpolation=cv2.INTER_CUBIC)
-
-            best_result = 0
-
-            # OTSU: works for any color with contrast
-            gray = cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2GRAY)
-            for method in [cv2.THRESH_BINARY + cv2.THRESH_OTSU,
-                           cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU]:
-                _, thresh = cv2.threshold(gray, 0, 255, method)
-                if cv2.countNonZero(thresh) < 8:
-                    continue
-                for psm in [7, 8, 6]:
-                    text = pytesseract.image_to_string(
-                        thresh, config=f"--psm {psm} -c tessedit_char_whitelist=0123456789"
-                    ).strip()
-                    if text and text.isdigit():
-                        val = int(text)
-                        if val > best_result:
-                            best_result = val
-
-            # Color masks: specific for white/red/green digits
-            for label, lower, upper in self._digit_color_masks:
-                mask = cv2.inRange(roi_bgr, lower, upper)
-                if cv2.countNonZero(mask) < 10:
-                    continue
-                for psm in [7, 8, 6]:
-                    text = pytesseract.image_to_string(
-                        mask, config=f"--psm {psm} -c tessedit_char_whitelist=0123456789"
-                    ).strip()
-                    if text and text.isdigit():
-                        val = int(text)
-                        if val > best_result:
-                            best_result = val
-
-            if best_result > 0:
-                return best_result
-
-            self._debug_save_roi("number_fail_original", roi)
-            return 0
-
-        except Exception:
-            return 0
 
     def _load_templates(self):
         templates_dir = get_templates_dir()
@@ -1147,19 +979,20 @@ class StateRecognizer:
                 if result != (0, 0):
                     return result
 
-        for _, lower, upper in [self._digit_color_masks[0], self._digit_color_masks[3]]:
-            mask = cv2.inRange(bottom, lower, upper)
-            if cv2.countNonZero(mask) >= 10:
-                result = self._ocr_minion_from_mask(bottom, mask)
-                if result != (0, 0):
-                    return result
+        # White/bright masks for minion stat digits
+        white_lower = np.array([150, 150, 150], dtype=np.uint8)
+        white_upper = np.array([255, 255, 255], dtype=np.uint8)
+        white_mask = cv2.inRange(bottom, white_lower, white_upper)
+        if cv2.countNonZero(white_mask) >= 10:
+            result = self._ocr_minion_from_mask(bottom, white_mask)
+            if result != (0, 0):
+                return result
 
-        combined_mask = np.zeros(bottom.shape[:2], dtype=np.uint8)
-        for _, lower, upper in self._digit_color_masks:
-            combined_mask = cv2.bitwise_or(combined_mask, cv2.inRange(bottom, lower, upper))
+        bright_lower = np.array([200, 200, 200], dtype=np.uint8)
+        bright_upper = np.array([255, 255, 255], dtype=np.uint8)
+        combined_mask = cv2.inRange(bottom, bright_lower, bright_upper)
         if cv2.countNonZero(combined_mask) >= 10:
             return self._ocr_minion_from_mask(bottom, combined_mask)
-        return 0, 0
 
     def _ocr_minion_from_mask(self, bottom: np.ndarray, mask: np.ndarray) -> Tuple[int, int]:
         num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(mask, connectivity=8)
@@ -1279,38 +1112,13 @@ class StateRecognizer:
         has_btn = self.detect_end_turn_button(turn_roi)
         if our_health == 0 and opp_health == 0 and not has_btn:
             return True
-        if not self.tesseract_available:
-            return False
-        try:
-            h, w = img.shape[:2]
-            center_roi = img[int(h * 0.35):int(h * 0.65), int(w * 0.3):int(w * 0.7)]
-            text = self._safe_ocr(center_roi, config="--psm 6")
-            text_lower = text.strip().lower()
-            for kw in ["胜利", "失败", "victory", "defeat", "you win", "you lose", "经验", "exp"]:
-                if kw in text_lower:
-                    return True
-        except Exception:
-            pass
         return False
 
     def detect_main_menu(self, play_roi: np.ndarray) -> bool:
         if play_roi is None or play_roi.size == 0:
             return False
         found, key, _ = self._match_any_template(play_roi, ["play"])
-        if found:
-            return True
-        if not self.tesseract_available:
-            return False
-        try:
-            text = self._safe_ocr(play_roi, config="--psm 6")
-            text_lower = text.strip().lower()
-            for kw in ["play", "开始", "对战", "排位", "休闲", "hplay", "bplay",
-                        "standard", "wild", "casual", "ranked"]:
-                if kw in text_lower:
-                    return True
-        except Exception:
-            pass
-        return False
+        return found
 
     def detect_post_game(self, crops: dict, turn_roi: np.ndarray, img: np.ndarray) -> bool:
         if self.detect_game_over(crops, turn_roi, img):
@@ -1432,7 +1240,8 @@ class StateRecognizer:
         game_state.has_end_turn_button = self.detect_end_turn_button(turn_roi)
         game_state.is_end_turn_green = self.detect_end_turn_green(turn_roi)
         game_state.end_turn_button_bbox = self.find_end_turn_button_bbox(img)
-        game_state.is_game_over = self.detect_game_over(crops, turn_roi, img)
+        if not game_state.log_data_available:
+            game_state.is_game_over = self.detect_game_over(crops, turn_roi, img)
         game_state.is_post_game = game_state.is_game_over
         game_state.is_main_menu = self.detect_main_menu(crops.get("play_button_region"))
 
@@ -1516,15 +1325,19 @@ class StateRecognizer:
         log_minions = log_state.our_minions if controller == 1 else log_state.opponent_minions
         gw = self.cfg["screen"]["game_region"]["width"]
         gh = self.cfg["screen"]["game_region"]["height"]
-        board_key = "our_board_positions" if controller == 1 else "enemy_board_positions"
+        parity = "odd" if len(log_minions) % 2 == 1 else "even"
+        board_key = f"our_board_positions_{parity}" if controller == 1 else f"enemy_board_positions_{parity}"
         result = []
         for i, lm in enumerate(log_minions):
-            pos = self._get_config_position(board_key, lm.zone_position - 1, gw, gh)  # 1-based to 0-based
+            n = len(log_minions)
+            config_key = (7 - n) // 2 + lm.zone_position - 1
+            pos = self._get_config_position(board_key, config_key, gw, gh)  # 1-based to 0-based
             if pos == (0, 0, 0, 0) and i < len(cv_minions):
                 pos = cv_minions[i].position
             result.append(MinionInfo(
                 health=lm.health, attack=lm.attack, position=pos,
-                can_attack=lm.can_attack, name=lm.name, card_id=lm.card_id,
+                can_attack=lm.can_attack, can_attack_hero=lm.can_attack_hero,
+                name=lm.name, card_id=lm.card_id,
                 has_taunt=lm.has_taunt, has_divine_shield=lm.has_divine_shield,
                 has_stealth=lm.has_stealth, is_elusive=lm.is_elusive,
                 has_poisonous=lm.has_poisonous, has_reborn=lm.has_reborn,

@@ -29,6 +29,7 @@ class LogMinion:
     zone_position: int = 0
     entity_id: int = 0
     can_attack: bool = False
+    can_attack_hero: bool = False
     has_taunt: bool = False
     has_divine_shield: bool = False
     has_stealth: bool = False
@@ -694,12 +695,25 @@ class HearthstoneLogTracker:
             charge = tags.get("CHARGE", 0)
             rush = tags.get("RUSH", 0)
             num_turns = tags.get("NUM_TURNS_IN_PLAY", 0)
-            can_attack = (exhausted == 0 and frozen == 0 and cant_attack == 0
-                         and num_attacks < max(1, windfury))
-            if not can_attack and charge == 1 and num_turns == 0:
-                can_attack = True
-            if not can_attack and rush == 1 and num_turns == 0:
-                can_attack = True
+            just_played = tags.get("JUST_PLAYED", 0)
+            # 0-attack minions cannot attack at all
+            if attack == 0:
+                can_attack = False
+                can_attack_hero = False
+            elif just_played == 1 and charge == 0 and rush == 0:
+                # Summoning sickness: no Charge/Rush -> cannot attack
+                can_attack = False
+                can_attack_hero = False
+            elif just_played == 1 and rush == 1:
+                # Rush: can attack minions but NOT hero on the first turn
+                can_attack = (exhausted == 0 and frozen == 0 and cant_attack == 0
+                             and num_attacks < max(1, windfury))
+                can_attack_hero = False
+            else:
+                # Charge or already waited a turn: can attack anything
+                can_attack = (exhausted == 0 and frozen == 0 and cant_attack == 0
+                             and num_attacks < max(1, windfury))
+                can_attack_hero = can_attack
             card_id = self._card_ids.get(eid, "")
             name = db.get_name(card_id) if card_id else ""
             race_val = tags.get("CARDRACE", 0)
@@ -713,6 +727,7 @@ class HearthstoneLogTracker:
             minions.append(LogMinion(
                 card_id=card_id, name=name, attack=attack, health=health,
                 zone_position=zone_pos, entity_id=eid, can_attack=can_attack,
+                can_attack_hero=can_attack_hero,
                 has_taunt=tags.get("TAUNT", 0) == 1,
                 has_divine_shield=tags.get("DIVINE_SHIELD", 0) == 1,
                 has_stealth=tags.get("STEALTH", 0) == 1,

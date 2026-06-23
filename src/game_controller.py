@@ -261,6 +261,13 @@ class GameController:
 
             self.logger.info(f"执行动作: {action} - {decision.get('reason', '')}")
 
+            # Re-check turn before executing (may have changed during CV processing)
+            if not self.running or self.paused:
+                return
+            if not current_state.is_our_turn:
+                self.logger.info("回合已结束, 取消动作")
+                return
+
             if action == "end_turn":
                 self._perform_end_turn(current_state)
                 return
@@ -274,6 +281,10 @@ class GameController:
             elif action == "attack":
                 self._perform_attacks(current_state)
 
+            elif action == "use_hero_power":
+                self._perform_hero_power(current_state)
+                self._sleep(1.0)
+
             elif action == "wait":
                 self._sleep(0.5)
 
@@ -281,6 +292,19 @@ class GameController:
 
         self.logger.warning("达到最大动作数，强制结束回合")
         self._perform_end_turn(game_state)
+
+    def _perform_hero_power(self, game_state: GameState):
+        region = self.cfg["game"].get("hero_power_region")
+        if not region:
+            self.logger.warning("未配置 hero_power_region")
+            return
+        screen_w = self.cfg["screen"]["game_region"]["width"]
+        screen_h = self.cfg["screen"]["game_region"]["height"]
+        cx = int((region[0] + region[2] / 2) * screen_w)
+        cy = int((region[1] + region[3] / 2) * screen_h)
+        self.logger.info(f"使用英雄技能: ({cx}, {cy})")
+        self.executor.click(cx, cy)
+        self._sleep(0.8)
 
     def _perform_end_turn(self, game_state: GameState):
         self.logger.info("结束回合")
@@ -356,6 +380,15 @@ class GameController:
             if not self.running or self.paused:
                 return
 
+            if not self.running or self.paused:
+                return
+
+            # Re-check turn before each attack
+            check_state = self.recognizer.recognize()
+            if not check_state.is_our_turn:
+                self.logger.info("攻击前检测到回合已结束, 跳过")
+                return
+
             attacker_idx = order["attacker_index"]
             if attacker_idx >= len(game_state.our_minions):
                 continue
@@ -367,6 +400,15 @@ class GameController:
                 t_idx = order["target_index"]
                 if t_idx < len(game_state.opponent_minions):
                     target_bbox = game_state.opponent_minions[t_idx].position
+            elif order["target_type"] == "enemy_hero":
+                region = self.cfg["game"]["enemy_health_region"]
+                screen_w = self.cfg["screen"]["game_region"]["width"]
+                screen_h = self.cfg["screen"]["game_region"]["height"]
+                ex = int(region[0] * screen_w)
+                ey = int(region[1] * screen_h)
+                ew = int(region[2] * screen_w)
+                eh = int(region[3] * screen_h)
+                target_bbox = (ex, ey, ex + ew, ey + eh)
 
             self.logger.info(f"随从 {attacker_idx} ({attacker.attack}/{attacker.health}) 攻击")
             self.executor.attack_with_minion(attacker.position, target_bbox)
